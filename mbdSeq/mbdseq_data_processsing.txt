@@ -1,0 +1,576 @@
+#MBD-seq data processing
+
+########################################
+#### DOWNLOAD READS FROM BASE-SPACE ####
+########################################
+#(see downloading_NGS_data_from_GSAF.txt for more on this)
+
+#DOWNLOAD AND ORGANIZE
+
+#list your current projects
+bs list project
+
+#download this one
+bs download project -i 140336211 -o JA19326
+
+
+#move fastqs into single directory
+mkdir fastqs
+for dir in ls -d JA19326/*/
+do echo "mv ${dir}*.gz fastqs/"
+done
+
+#CHECK FILES
+ls *.gz | wc -l
+
+	#64 = 2 genotypes x 2 tissues x 2 met/ub x 2 reps x 4 lane dups
+
+#DECOMPRESS
+for file in *.gz; do echo "gunzip $file" >> decomp; done
+launcher_creator.py -n decomp -j decomp -q development -N 1 -w 36 -a $allo -e $email -t 00:15:00
+
+#CONCATENATE LANE DUPLICATES
+mkdir cattedFastqs
+>doCat
+for file in *_L001_R1_001.fastq
+do LANE1=${file}
+LANE2=${file/_L001_R1_001.fastq/}_L002_R1_001.fastq
+LANE3=${file/_L001_R1_001.fastq/}_L003_R1_001.fastq
+LANE4=${file/_L001_R1_001.fastq/}_L004_R1_001.fastq
+OUTFILE=${file/_L001_R1_001.fastq/}.fastq
+echo "cat ${LANE1} ${LANE2} ${LANE3} ${LANE4} > cattedFastqs/${OUTFILE}" >> doCat
+done
+
+launcher_creator.py -n doCat -j doCat -q development -N 1 -w 36 -a $allo -t 00:10:00
+
+
+#CHECK READS
+cd cattedFastqs
+ls *.fastq | wc -l
+	#16 = 2 genotypes x 2 tissues x 2 met/ub x 2 reps
+	
+
+########################################
+############## RUN FASTQC ##############
+########################################
+
+
+#SET UP DIRECTORY WITH SUBSETS FOR QUICK TESTS
+
+NTEST=400000
+mkdir testRun
+for file in *.fastq
+do head -n $NTEST $file > testRun/${file}
+done
+
+
+#Run FastQC on subsets
+
+module load fastqc
+mkdir Fastqc_Restults_raw/
+> runFQC
+for file in *.fastq
+do echo "fastqc -o Fastqc_Restults_raw/ -f fastq $file" >> runFQC
+done
+
+launcher_creator.py -n runFQC -j runFQC -q development -N 1 -w 36 -a $allo -t 00:10:00
+sbatch runFQC.slurm
+
+
+
+
+########################################
+############### TRIMMING ###############
+########################################
+
+#RUN TRIMMING
+>trimse
+for file in *.fastq
+do echo "cutadapt \
+-a GATCGGAAGAGCA \
+--minimum-length 20 \
+-q 20 \
+-o ${file/.fastq/}.trim \
+$file > ${file}_trimlog.txt" >> trimse
+done
+
+launcher_creator.py -n trimse -j trimse -q normal -N 1 -w 16 -a $allo -e $email -t 05:00:00
+
+
+#################################
+############ MAPPING ############
+#################################
+
+#RUN BOWTIE
+
+#selet the concatenation of Amil.v2, clade C and clade D references
+module load bowtie
+export REFERENCE_GENOME="/work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00_symbC1_catted/Amil_SymC1.fasta"
+
+
+>mapse
+for file in *.trim
+do echo "\
+bowtie2 -x $REFERENCE_GENOME -U ${file} --local -p 12 -S ${file/.trim/}.sam">> mapse
+done
+
+#note wayness more than 6 is no good for this
+launcher_creator.py -n mapMBD -j mapse -q normal -N 4 -w 4 -a $allo -e $email -t 10:00:00
+
+
+#CHECK EFFICIENCY
+
+mapMBD.e2409177
+
+
+
+###########################################
+##### PREPARE ALIGNMENTS FOR COUNTING #####
+###########################################
+
+#SORT BY COORDIANTE, REMOVE DUPLICATES, THEN CONVERT BACK TO SAM FOR COUNTING
+#These are fast, but removing duplicates takes a lot of memory
+
+#SET UP PICARDS REMOVE DUPS EXECUTABLE
+#for loneststar
+MARK_DUPS_EX="java -Xms4g -jar /work/02260/grovesd/lonestar/picard/picard-tools-1.119/MarkDuplicates.jar"
+#or stampede
+MARK_DUPS_EX="java -Xms4g -jar /home1/apps/intel17/picard/2.11.0/build/libs/picard.jar MarkDuplicates"
+
+#run sort, convert, and remove dups on the samfiles
+module load samtools
+module load picard
+>removeDups
+for file in *.sam
+do runID=${file/.sam/}
+ echo "samtools sort -O bam -o ${runID}_sorted.bam $file &&\
+ $MARK_DUPS_EX\
+ INPUT=${runID}_sorted.bam\
+ OUTPUT=${runID}_dupsRemoved.bam\
+ METRICS_FILE=${runID}_dupMetrics.txt\
+ REMOVE_DUPLICATES=true" >> removeDups
+ done
+ 
+launcher_creator.py -n removeDups -j removeDups -t 8:00:00 -q normal -a $allo -e $email -N 8 -w 2
+##run only two per node, assuming 12 sam files, using six nodes allows for all to run simultaneously, expect run to last ~2-4 hours
+
+
+#######################################
+####### PIPELINE COUNTS RESULTS #######
+#######################################
+
+#GET READ COUNTS
+wc -l *.fastq |\
+ awk '{split($2, a, ".fastq")
+ print a[1]"\t"$1/4"\trawCounts"}' |\
+ grep -v total > raw_read_counts.tsv &
+
+
+#GET POST TRIMMING READ COUNT
+wc -l *.trim |\
+ awk '{split($2, a, ".trim")
+ print a[1]"\t"$1/4"\ttrimmedCounts"}' |\
+ grep -v total > trimmed_read_counts.tsv &
+
+
+
+#get alignment counts before removal
+>getInitialAlignment
+for file in *sorted.bam
+do echo "samtools flagstat $file > ${file/_sorted.bam/}_prededup_flagstats.txt" >> getInitialAlignment
+done
+
+
+#get post removal alignment counts
+>getDupRemAlignment
+for file in *dupsRemoved.bam
+do echo "samtools flagstat $file > ${file/.bam/}_post_dedup_flagstats.txt &" >> getDupRemAlignment
+done
+
+
+
+#format total reads
+>prededup_mapped_count.tsv
+for file in *prededup_flagstats.txt
+do pp=$(grep "mapped" $file | head -n 1)
+ echo -e "$file\t$pp" |\
+ awk '{split($1, a, "_prededup_flagstats.txt")
+ print a[1]"\t"$2"\tpredupMapped"}' >> prededup_mapped_count.tsv
+ done
+
+
+#format total reads
+>dedup_mapped_count.tsv
+for file in *_post_dedup_flagstats.txt
+do pp=$(grep "mapped" $file | head -n 1)
+ echo -e "$file\t$pp" |\
+ awk '{split($1, a, "_dupsRemoved_post_dedup_flagstats.txt")
+ print a[1]"\t"$2"\tdedupMapped"}' >> dedup_mapped_count.tsv
+ done
+
+
+
+###########################################
+####### SPLIT ALIGNMENTS BY SPECIES #######
+###########################################
+
+#make bed files for the scaffolds
+bed_from_fasta.py -fa Amil_SymC1.fasta > all_scaffolds.bed
+grep "^SymbC1" all_scaffolds.bed > symbC1_scaffolds.bed
+grep -v "^SymbC1" all_scaffolds.bed > host_scaffolds.bed
+
+
+>separate
+#split the bamfiles for symbiont
+for file in *.bam
+do echo "samtools view -L symbC1_scaffolds.bed -o ${file/.bam/}_symbC.bam $file" >>separate
+done
+
+#split the bamfiles for host
+for file in *.bam
+do echo "samtools view -L host_scaffolds.bed -o ${file/.bam/}_host.bam $file" >>separate
+done
+
+
+
+######################################
+######## GET COUNTS FOR GBM ##########
+######################################
+
+#--------- FOR HOST:
+#Choose the GFF
+
+MY_GFF="$WORK/Amil_Zach_Fullers_v2.00/Amil.coding.gff3"; GENE_ID="ID"
+echo "featureCounts -a $MY_GFF -p -t gene -g $GENE_ID -o featureCounts_geneCounts.tsv -T 64 --primary *_dupsRemoved_host.bam" > runFeatureCounts
+
+
+#fix names eg:
+sed -i.bak 's/_dupsRemoved_host.bam//g' featureCounts_geneCounts.tsv
+
+
+#-------- FOR SYMBIONT:
+#for symbiont
+MY_GFF="/work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00_symbC1_catted/SymbC1.Gene_Models.Revised.GFF3"; GENE_ID="ID"
+echo "/work/02260/grovesd/stampede2/subread-1.6.3-source/bin/featureCounts -a $MY_GFF -t gene -g $GENE_ID -o symbiont_gene_counts.txt -T 64 --primary *_symbC.bam" > runFeatureCounts
+
+
+sed -i.bak 's/_sorted_symbC.bam//g' symbiont_gene_counts.txt
+
+
+#######################################
+######### GET WINDOW COUNTS ###########
+#######################################
+
+#window generation is shown in picoMethyl_data_processing_pipeline.txt
+#get the bed files with windows
+cp /work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00/*.bed .
+#exclude the window bed files since these are so huge
+#deal with those in parallel below
+
+ls *.bed
+	cdsBoundaries.bed
+	chromLengths_sorted.bed
+	DNA_repeats.bed
+	five_prime_UTR_Boundaries.bed
+	geneBoundaries.bed
+	intergenicBoundaries.bed
+	intronBoundaries.bed
+	LINE_repeats.bed
+	Low_complexity_repeats.bed
+	LTR_repeats.bed
+	promoterBoundaries.bed
+	RC_repeats.bed
+	Rolling_Circle_repeats.bed
+	Simple_repeat_repeats.bed
+	SINE_repeats.bed
+	three_prime_UTR_Boundaries.bed
+	tssBoundaries.bed
+	Unknown_repeats.bed
+
+#run bedtools
+>runBedtools
+for BEDFILE in *.bed
+do echo "bedtools multicov -bams *_dupsRemoved.bam -bed $BEDFILE > mbd_${BEDFILE}_counts.tsv0" >> runBedtools
+done
+
+launcher_creator.py -n runBedtools -j runBedtools -q normal -N 1 -w 18 -a $allo -e $email -t 12:00:00
+
+
+#format output
+samples=`ls *_dupsRemoved.bam | sed 's/_dupsRemoved.bam//' | tr "\n" "\t"`
+echo -e "chr\tstart\tend\tname\t$samples" > header.txt
+
+#cat the header to each set of counts
+>headcat
+for file in *_counts.tsv0
+do echo "cat header.txt $file > ${file/_counts.tsv0/}_multicov.tsv" >> headcat
+done
+
+
+#----- split by chromosome for parallelizing for small windows -----#
+window1KbFile=/work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00/windowBoundaries_1kb.bed
+window500bpFile=/work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00/windowBoundaries_500bp.bed
+
+
+#build chr beds
+cp /work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00/chrs.txt .
+while read chr
+do echo "${chr}..."
+grep -w "^${chr}" $window500bpFile > ${chr}_500bp_windows.bed
+done < chrs.txt
+grep -v "^chr" $window500bpFile > chrUn_500bp_windows.bed
+
+#run multicov for each
+>paraMulticov
+for file in chr*500bp_windows.bed
+do echo "bedtools multicov -bams *.bam -bed $file > mbd_${file}_counts.tsv0" >>paraMulticov
+done
+
+launcher_creator.py -n paraMulticov -j paraMulticov -q normal -N 1 -w 15 -a $allo -e $email -t 10:00:00
+sbatch paraMulticov.slurm
+
+#returns 15 *counts.tsv0 files. One for each chromosome and 1 for scaffolds
+#add headers to each
+samples=`ls *_dupsRemoved.bam | sed 's/_dupsRemoved.bam//' | tr "\n" "\t"`
+echo -e "chr\tstart\tend\tname\t$samples" > header.txt
+for file in *_counts.tsv0
+do echo "cat header.txt $file > ${file/_counts.tsv0/}_multicov.tsv"
+done
+
+
+#Run DESeq on them on TACC
+for file in *bed_multicov.tsv
+do echo "mbdseq_differences_TACC.R --i $file --pCut 0.2 --o ${file/.bed_multicov.tsv/} &"
+done
+
+#ASSEMBLE INTO FINAL TSV FILES
+#genotype
+head -n 1 mbd_chrUn_500bp_windows_genotype_response.tsv > mbd_500bp_window_genotype_allResponse.tsv
+for file in *_windows_genotype_response.tsv
+do echo "${file}..."
+ tail -n +2 $file >> mbd_500bp_window_genotype_allResponse.tsv
+done
+
+#check
+wc -l *_windows_genotype_response.tsv
+wc -l mbd_500bp_window_genotype_allResponse.tsv
+
+
+#tissue
+head -n 1 mbd_chrUn_500bp_windows_tissue_response.tsv > mbd_500bp_window_tissue_allResponse.tsv
+for file in *_windows_tissue_response.tsv
+do tail -n +2 $file >> mbd_500bp_window_tissue_allResponse.tsv
+done
+
+#check
+wc -l *_windows_tissue_response.tsv
+wc -l mbd_500bp_window_tissue_allResponse.tsv
+
+#send to PC here: benchmarking_coral_methylation/mbdSeq/datasets/
+#incorporate into results list with process_MBDseq.R
+
+
+
+
+
+#############################################
+###### VARY WINDOW SIZES FOR PRECISION ######
+#############################################
+
+#INSTRUCTIONS FOR BUILDING THE BED FILES IN picoMethyl_data_processing_pipeline.txt
+
+#SET UP SCAFFOLD BED FILES FOR PARALELLIZING
+
+#split up the bedfiles
+grep ">" /work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00/Amil.v2.00.chrs.fasta | sed 's/>//' > uchrs.txt
+
+mkdir split_beds
+>bedSplits
+while read chr
+do for file in windowBoundaries*.bed
+do echo "grep -w \"^${chr}\" $file > split_beds/${file/.bed/}_${chr}.bed" >> bedSplits
+done
+done < uchrs.txt
+
+#grab the bam files
+ln -s /scratch/02260/grovesd/benchmarking_project/mbdSeq/hostBams/*_dupsRemoved_host.bam* .
+
+
+
+#GET COUNTS FOR EACH SET OF WINDOWS
+>getCounts
+for file in windowBoundaries_*.bed
+do echo "bedtools multicov -bams *_dupsRemoved_host.bam -bed $file > ${file/windowBoundaries_/}.tsv" >> getCounts
+done
+
+launcher_creator.py -n mbdPrecis -j getCounts -q normal -N 1 -w 7 -a $allo -e $email -t 08:00:00
+
+#ASSEMBLE THE RESULTS
+#build headers
+samples=$(ls *_host.bam | tr "\n" "\t" | sed "s|\t*$||")
+echo -e "chr\tstart\tend\tname\t${samples}" > header.txt
+
+#cat them to results
+for file in *.bed.tsv
+do echo "cat header.txt $file > ${file/.bed.tsv/}_windowRes.tsv"
+done
+
+#send to Mac
+
+
+#######################################
+####### PIPELINE COUNTS RESULTS #######
+#######################################
+
+
+wc -l *.fastq |\
+ awk '{split($2, a, ".fastq")
+ print a[1]"\t"$1/4"\trawCounts"}' |\
+ grep -v total > raw_read_counts.tsv &
+
+
+
+
+#GET POST TRIMMING READ COUNT
+wc -l *.trim |\
+ awk '{split($2, a, ".trim")
+ print a[1]"\t"$1/4"\ttrimmedCounts"}' |\
+ grep -v total > trimmed_read_counts.tsv 
+
+
+
+
+#get alignment counts before removal
+>getInitialAlignment
+for file in *sorted.bam
+do echo "samtools flagstat $file > ${file/_sorted.bam/}_prededup_flagstats.txt &" >> getInitialAlignment
+done
+
+#get post removal alignment counts
+>getDupRemAlignment
+for file in *dupsRemoved.bam
+do echo "samtools flagstat $file > ${file/.bam/}_post_dedup_flagstats.txt &" >> getDupRemAlignment
+done
+
+
+
+#format properly paired reads
+>prededup_properly_paired_count.tsv
+for file in *prededup_flagstats.txt
+do pp=$(grep "properly paired" $file); echo -e "$file\t$pp" |\
+ awk '{split($1, a, "_prededup_flagstats.txt")
+ split($7, b, "(")
+ print a[1]"\t"$2"\tpredupPropPaired"}' >> prededup_properly_paired_count.tsv
+ done
+
+#format total reads
+>prededup_mapped_count.tsv
+for file in *prededup_flagstats.txt
+do pp=$(grep "mapped" $file | head -n 1)
+ echo -e "$file\t$pp" |\
+ awk '{split($1, a, "_prededup_flagstats.txt")
+ print a[1]"\t"$2"\tpredupMapped"}' >> prededup_mapped_count.tsv
+ done
+
+
+#removal metrics
+>dupRemovalMetrics.tsv
+for file in *dupMetrics.txt
+do pct=$(sed '8q;d' $file | cut -f 8)
+echo -e "$file\t$pct" |\
+ awk '{split($1, a, "_dupMetrics.txt")
+ print a[1]"\t"$2"\tdupRemProp"}' >> dupRemovalMetrics.tsv
+done
+
+
+#format properly paired reads
+>dedup_properly_paired_count.tsv
+for file in *_post_dedup_flagstats.txt
+do pp=$(grep "properly paired" $file)
+ echo -e "$file\t$pp" |\
+ awk '{split($1, a, "_dupsRemoved_post_dedup_flagstats.txt")
+ print a[1]"\t"$2"\tdedupPropPair"}' >> dedup_properly_paired_count.tsv
+done
+
+#format total reads
+>dedup_mapped_count.tsv
+for file in *_post_dedup_flagstats.txt
+do pp=$(grep "mapped" $file | head -n 1)
+ echo -e "$file\t$pp" |\
+ awk '{split($1, a, "_dupsRemoved_post_dedup_flagstats.txt")
+ print a[1]"\t"$2"\tdedupMapped"}' >> dedup_mapped_count.tsv
+ done
+
+
+#COUNTED ON GENES
+total_gene_counts_featureCounts.R feature_counts_geneCounts.tsv
+
+
+
+#DATA PROCESSING RESULTS FILES SO FAR:
+raw_read_counts.tsv
+trimmed_read_counts.tsv
+prededup_properly_paired_count.tsv
+prededup_mapped_count.tsv
+prededup_mapping_eff.tsv
+dupRemovalMetrics.tsv
+dedup_properly_paired_count.tsv
+dedup_mapped_count.tsv
+dedup_mapping_eff.tsv
+
+#cat these into allStats.txt
+
+
+
+
+#############################################
+############## SIMULATE POOLS ###############
+#############################################
+
+
+#split files into twelths
+>doSplits
+for file in *.trim
+do twelth=`echo $(($(wc -l $file | cut -d " " -f 1) / 12))`
+echo "split -l $twelth $file ${file/.trim}_SUB" >> doSplits
+done
+
+#concatenate these into bits for 3x pools
+>makeCats
+for file in *.trim
+do echo "cat ${file/.trim/}_SUBa[a,b,c,d] > ${file/.trim}_POOL1.fq" >>makeCats
+echo "cat ${file/.trim/}_SUBa[e,f,g,h] > ${file/.trim}_POOL2.fq" >>makeCats
+echo "cat ${file/.trim/}_SUBa[i,j,k,l] > ${file/.trim}_POOL3.fq" >>makeCats
+done
+
+
+#build genotype pools
+cat m-L5-*POOL1*.fq > m_L5_pool1.fastq
+cat m-L5-*POOL2*.fq > m_L5_pool2.fastq
+cat m-L5-*POOL3*.fq > m_L5_pool3.fastq
+
+cat ub-L5-*POOL1*.fq > ub_L5_pool1.fastq
+cat ub-L5-*POOL2*.fq > ub_L5_pool2.fastq
+cat ub-L5-*POOL3*.fq > ub_L5_pool3.fastq
+
+cat m-N12-*POOL1*.fq > m_N12_pool1.fastq
+cat m-N12-*POOL2*.fq > m_N12_pool2.fastq
+cat m-N12-*POOL3*.fq > m_N12_pool3.fastq
+
+cat ub-N12-*POOL1*.fq > ub_N12_pool1.fastq
+cat ub-N12-*POOL2*.fq > ub_N12_pool2.fastq
+cat ub-N12-*POOL3*.fq > ub_N12_pool3.fastq
+
+#return to top and re-analyze
+
+
+#############################################
+######### REDUCED POOL METHOD TEST ##########
+#############################################
+
+#MAKE FINAL REDUCTION FROM THE POOLS 
+#(messed up but his will work fine)
+>randSubs
+for file in *pool*.fastq
+do echo "random_fastq_subsetter.py -i $file -n 8000000 -o ${file/.fastq/}_8milFINAL.trim" >> randSubs
+done

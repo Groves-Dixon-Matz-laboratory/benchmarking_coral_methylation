@@ -1,0 +1,13 @@
+Status	L5-S1_S216_host.bam	L5-S2_S217_host.bam	L5-S3_S218_host.bam	L5-T1_S222_host.bam	L5-T2_S223_host.bam	L5-T3_S224_host.bam	N12-S1_S219_host.bam	N12-S2_S220_host.bam	N12-S3_S221_host.bam	N12-T1_S225_host.bam	N12-T2_S226_host.bam	N12-T3_S227_host.bam
+Assigned	2075979	1336433	1627049	1970119	1870860	2303355	1916600	2001021	1562832	1848228	1759832	1900834
+Unassigned_Unmapped	0	0	0	0	0	0	0	0	0	0	0	0
+Unassigned_MappingQuality	0	0	0	0	0	0	0	0	0	0	0	0
+Unassigned_Chimera	0	0	0	0	0	0	0	0	0	0	0	0
+Unassigned_FragmentLength	0	0	0	0	0	0	0	0	0	0	0	0
+Unassigned_Duplicate	0	0	0	0	0	0	0	0	0	0	0	0
+Unassigned_MultiMapping	0	0	0	0	0	0	0	0	0	0	0	0
+Unassigned_Secondary	0	0	0	0	0	0	0	0	0	0	0	0
+Unassigned_Nonjunction	0	0	0	0	0	0	0	0	0	0	0	0
+Unassigned_NoFeatures	1792643	1199033	1398266	1676860	1625799	1937040	1661604	1779208	1360748	1583404	1651627	1627284
+Unassigned_Overlapping_Length	0	0	0	0	0	0	0	0	0	0	0	0
+Unassigned_Ambiguity	115797	66053	84875	101455	90420	114590	57274	54850	43514	55661	48117	55900

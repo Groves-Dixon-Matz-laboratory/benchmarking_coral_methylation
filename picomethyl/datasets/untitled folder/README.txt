@@ -1,0 +1,1 @@
+#Still using the cov resampled ones for now. Still need to replace these with the resampled fastq equivalents.

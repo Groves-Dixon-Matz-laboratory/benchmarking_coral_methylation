@@ -1,0 +1,22 @@
+##########################################
+######### REPETITIVE ELEMENTS ############
+##########################################
+
+#we already have a gff of repeat elements from Zach Fuller's genome build:
+Amil.repeat.gff
+
+#use repeat_bed_from_gff.R to pull out bed files for each repeat type from this file
+
+DNA_repeats.bed
+LINE_repeats.bed
+LTR_repeats.bed
+Low_complexity_repeats.bed
+RC_repeats.bed
+SINE_repeats.bed
+Simple_repeat_repeats.bed
+Unknown_repeats.bed
+
+
+#################################################
+######### INTERGENIC, INTRONS, EXONS ############
+#################################################

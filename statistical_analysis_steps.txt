@@ -1,0 +1,86 @@
+#statistical_analysis_steps.txt
+#Steps for running statistical analyses on outputs from the data processing steps
+
+
+Get stats on pipeline counts
+	figure_plotting/pipeline_counts.R
+
+
+Prepare data from each assay:
+
+	#WGBS
+	complete steps in picoMethyl_data_processing_pipeline.txt
+	format methylation level and responses with picomethyl/process_picoMethyl.R
+
+	#MBD-SEQ
+	complete steps in mbdseq_data_processsing.txt
+	estimate methylation level and responses with mbdSeq/process_MBDseq.R
+
+	#MethylRAD
+	complete steps in methylRAD_data_processing_pipeline.txt
+	estimate methylation level and responses with methylRAD/process_methylRAD.R
+	
+Check overall trends:
+	figure_plotting/pca_and_adonis.R
+	
+Combine datasets for plotting:
+
+	combine the level estimates with comparisons/compare_level.R
+		also plots equivalents to main GBM histogram and scatterplot figures for exons, promoters, and 1Kb windows
+		
+	combine response estimates with comparisons/compare_responses.R
+		also outputs GO_MWU input files for fisher's test for missing genes into subdirectory go_mwu/
+
+Plot level figures
+
+	plot level stuff with figure_plotting/plot_gbm_level_figs.R
+		plots main GBM histogram and scatterplot figure
+		plots cpgoe correlations
+		plots alternative measure multipanel plots for all three assays
+	
+	plot levels for more genomic regions with figure_plotting/region_type_comparison.R
+		plots violin plots for additional genomic regions like UTRs and repetitive elements
+		plots the scatterplots for correlation between level estimates for repetitive elements
+	
+
+	plot response stuff with figure_plotting/plot_gbm_response_figs.R
+		plots the main response figure with volcanos and scatterplots
+		also plots similar figures for exons, promoters, and 1kb windows
+	
+
+	GO_MWU for genes' presence in the response data
+	
+
+
+Window precision stuff
+	Set up window precision inputs for each assay:
+		picomethyl/process_windowPrecision_picoMethyl.R
+		mbdSeq/process_windowPrecision_MBDseq.R
+		methylRAD/process_windowPrecision_methylRAD.R
+
+	Plot window precision results with figure_plotting/window_precision.R
+
+Plot read reduction stuff
+	First process the read reductions for each:
+	#WGBS with picomethyl/picoMethyl_read_reductions.R (first create the simulated reductions following TACC walkthrough)
+	#MBD-seq with mbdSeq/MBDseq_read_reductions.R
+	#methylRAD with methylRAD/methylRAD_read_reductions.R
+		Each of thes above creates countReducedLvls.Rdata and countReducedDifferences.Rdata files
+	
+	Plot the effect on GBM level estimates with figure_plotting/read_reduced_gbm_level.R
+	
+	Plot the effect on GBM response with figure_plotting/read_reduced_gbm_responseV3.R
+		plots the main read reduction response figure
+		plots the PCA false positive figure (decided not to include this though)
+	
+	
+	
+	
+	
+
+	
+
+
+
+
+

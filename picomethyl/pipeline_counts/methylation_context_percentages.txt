@@ -1,0 +1,9 @@
+file	CpG.pct	CHG.pct	CHH.pct	CN_or_CHH
+pm-L5-s2_S5.trim_bismark_bt2_SE_report.txt	9.5%	2.1%	2.4%	
+pm-L5-s3_S1.trim_bismark_bt2_SE_report.txt	8.2%	2.1%	2.4%	
+pm-L5-t1_S6.trim_bismark_bt2_SE_report.txt	8.7%	1.9%	2.3%	
+pm-L5-t3_S2.trim_bismark_bt2_SE_report.txt	9.3%	2.3%	2.8%	
+pm-N12-s2_S7.trim_bismark_bt2_SE_report.txt	9.9%	2.4%	3.0%	
+pm-N12-s3_S3.trim_bismark_bt2_SE_report.txt	9.1%	2.2%	2.6%	
+pm-N12-t1_S8.trim_bismark_bt2_SE_report.txt	9.4%	2.2%	2.7%	
+pm-N12-t3_S4.trim_bismark_bt2_SE_report.txt	8.9%	1.7%	2.2%	

@@ -1,0 +1,13 @@
+Status	L5-S1_S216_dupsRemoved.bam	L5-S2_S217_dupsRemoved.bam	L5-S3_S218_dupsRemoved.bam	L5-T1_S222_dupsRemoved.bam	L5-T2_S223_dupsRemoved.bam	L5-T3_S224_dupsRemoved.bam	N12-S1_S219_dupsRemoved.bam	N12-S2_S220_dupsRemoved.bam	N12-S3_S221_dupsRemoved.bam	N12-T1_S225_dupsRemoved.bam	N12-T2_S226_dupsRemoved.bam	N12-T3_S227_dupsRemoved.bam
+Assigned	957160	702161	754426	943823	1008562	1126795	821665	919759	765503	864194	925089	904591
+Unassigned_Unmapped	0	0	0	0	0	0	0	0	0	0	0	0
+Unassigned_MappingQuality	0	0	0	0	0	0	0	0	0	0	0	0
+Unassigned_Chimera	0	0	0	0	0	0	0	0	0	0	0	0
+Unassigned_FragmentLength	0	0	0	0	0	0	0	0	0	0	0	0
+Unassigned_Duplicate	0	0	0	0	0	0	0	0	0	0	0	0
+Unassigned_MultiMapping	0	0	0	0	0	0	0	0	0	0	0	0
+Unassigned_Secondary	0	0	0	0	0	0	0	0	0	0	0	0
+Unassigned_Nonjunction	0	0	0	0	0	0	0	0	0	0	0	0
+Unassigned_NoFeatures	710867	538502	551961	679111	768975	923758	578915	682255	546705	615662	708760	647947
+Unassigned_Overlapping_Length	0	0	0	0	0	0	0	0	0	0	0	0
+Unassigned_Ambiguity	29758	21891	23604	28458	29877	35070	24847	26914	22229	25236	25490	26085

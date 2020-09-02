@@ -1,0 +1,6 @@
+L5_pool1_bismark_bt2_SE_report.txt	62687689	mappedCount
+L5_pool2_bismark_bt2_SE_report.txt	62728753	mappedCount
+L5_pool3_bismark_bt2_SE_report.txt	62715106	mappedCount
+N12_pool1_bismark_bt2_SE_report.txt	61543576	mappedCount
+N12_pool2_bismark_bt2_SE_report.txt	61597748	mappedCount
+N12_pool3_bismark_bt2_SE_report.txt	61590403	mappedCount

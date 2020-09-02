@@ -1,0 +1,1213 @@
+#picomethyl_data_processing_pipeline.txt
+
+
+############################
+######## PREP READS ########
+############################
+
+#download from basespace
+bs download project -i 138066932 -o JA19274
+bs download project -i 138066931 -o JA19275
+
+
+#organize fastqs
+mkdir fastqs 
+cd fastqs
+for dir in $(ls -d ../JA19274/*)
+do echo "mv $dir/*.gz ."
+done
+
+#decompress
+for file in *.gz; do echo "gunzip $file &";done
+
+
+#RUN FASTQC
+mkdir raw_fqc_subs
+for file in *.fastq
+do head -n 400000 $file > raw_fqc_subs/${file}
+done
+cd raw_fqc_subs
+module load fastqc
+mkdir Fastqc_Restults_raw/
+> runFQC
+for file in *.fastq
+do echo "fastqc -o Fastqc_Restults_raw/ -f fastq $file &" >> runFQC
+done
+
+
+
+#CONCATENATE LANES
+#sequencing was done in two jobs each with two lanes
+#lanes were 2 and 3 or 4 and 5 for each sample
+ls *.fastq | wc -l
+ #16
+
+#from job1
+for file in *L002_R1_001.fastq
+do echo "cat $file ${file/_L002_/_L003_} > ${file/_L002_R1_001.fastq/}.fq &"
+done
+
+
+#from job2
+for file in *L004_R1_001.fastq
+do echo "cat $file ${file/_L004_/_L005_} > ${file/_L004_R1_001.fastq/}.fq &"
+done
+
+#check results
+ls *.fq | wc -l
+	#8 = 2 genotypes x 2 tissues x 2 replicates per
+
+
+#TRIM
+>trimse
+for file in *.fq
+do echo "cutadapt \
+-a GATCGGAAGAGCA \
+-a AGATCGGAAGAGC \
+--minimum-length 30 \
+-q 20 \
+-o ${file/.fq/}.trim \
+$file" >> trimse
+done
+
+
+#GET POST TRIMMING READ COUNT
+wc -l *.fq | awk 'BEGIN {print "file\tlineCount\treadCount"};{print $2"\t"$1"\t"$1/4}' > raw_read_counts.tsv &
+wc -l *.trim | awk 'BEGIN {print "file\tlineCount\treadCount"};{print $2"\t"$1"\t"$1/4}' > trimmed_read_counts.tsv &
+
+
+############################################
+## PREPARE METHYLATION REFERENCEOM GENOME ##
+############################################
+#download the lambda genome from here: https://www.ncbi.nlm.nih.gov/nuccore/J02459.1?report=fasta
+#download a mitochondrial genome from here: https://www.ncbi.nlm.nih.gov/nuccore/NC_022830.1?report=fasta
+#concatenate onto reference
+cat Amil.v2.00.chrs.fasta Adig_mito.fasta lambda.fasta > Amil.v2.00.chrs_forWGS.fasta
+
+#index for Bismark
+module load bowtie
+bismark_genome_preparation --genomic_composition /work/02260/grovesd/lonestar/bismark_Amil_Zach_Fullers_v2.00
+
+
+
+#########################################
+#### CHECK DIRECTIONALITY OF DATASET ####
+#########################################
+cd raw_fqc_subs/
+for file in *.fastq
+do head -n $NTEST $file > testRun/${file}
+done
+
+
+#run Bismark on subsets in --non_directional mode
+
+#check the output report:
+		#example:
+		Number of sequence pairs with unique best (first) alignment came from the bowtie output:
+		CT/GA/CT:	3897	((converted) top strand)
+		GA/CT/CT:	1	(complementary to (converted) top strand)
+		GA/CT/GA:	0	(complementary to (converted) bottom strand)
+		CT/GA/GA:	3953	((converted) bottom strand)
+		
+#If the two 'complementary' ones are zero or near zero, the library was directional
+#If they are roughly equal, then the library is non-directional
+
+
+
+
+#####################################
+########## RUNNING BISMARK ##########
+#####################################
+
+#HERE IF WORKING WITH SYMBIOTN DATA, SWITCH TO picoMethyl_data_processing_pipeline_SYMBIONT.txt
+
+
+#set reference path
+GENOME_PATH="/work/02260/grovesd/lonestar/bismark_Amil_Zach_Fullers_v2.00"
+
+
+
+#FOR SINGLE END
+module load bowtie
+module load samtools
+>runBismark
+for file in *.trim
+do echo "bismark --bowtie2 --score_min L,0,-0.6 -N 1 --non_directional --multicore 4 --genome $GENOME_PATH $file" >> runBismark
+done
+
+
+#EXTRACT THE METHYLATION RESULTS
+GENOME_PATH="/work/02260/grovesd/lonestar/bismark_Amil_Zach_Fullers_v2.00"
+module load samtools
+>extractMeth
+for file in *bismark_bt2.bam
+do echo "bismark_methylation_extractor $file -s --multicore 2 --ample_memory --merge_non_CpG --comprehensive --cytosine_report --genome_folder $GENOME_PATH" >> extractMeth
+done
+
+#####################################
+#### QC BASED ON MITO AND LAMBDA ####
+#####################################
+
+#grep out the sequence definition lines below from covs
+
+#cat the lambda data
+cat *_J02459.1_lambda.sub > allLambda.cov
+
+#cat the mito data
+cat *NC_022830.1_Acropora_digitifera.sub > allMito.cov
+
+#send these to PC and analyze with conversion_efficieny.R
+
+
+
+###########################################
+######### ASSEMBLE PIPELINE COUNTS ########
+###########################################
+
+
+#RAW COUNTS
+wc -l *.fq |\
+ awk '{split($2, a, ".fq")
+ print a[1]"\t"$1/4"\trawCounts"}' |\
+ grep -v total > raw_read_counts.tsv &
+
+
+
+#POST TRIMMING READ COUNT
+wc -l *.trim |\
+ awk '{split($2, a, ".trim")
+ print a[1]"\t"$1/4"\ttrimmedCounts"}' |\
+ grep -v total > trimmed_read_counts.tsv &
+
+>all_bisulfite_reports.txt
+for file in *SE_report.txt
+do echo -e "${file}....\n" >> all_reports.txt; cat $file >> all_bisulfite_reports.txt
+echo -e "\n\n---------------------------------------------------" >> all_bisulfite_reports.txt
+done
+
+
+#TOTAL MAPPED COUNTS
+>bismark_mapped_counts.tsv
+for file in *SE_report.txt
+do mapped=$(grep "Number of alignments with a unique" $file | cut -f 2)
+sample=${file/.trim_bismark_bt2_SE_report.txt/}
+echo -e "${sample}\t${mapped}\tmappedCount" >> bismark_mapped_counts.tsv
+done
+
+
+#MAPPING EFFICIENCIES
+>bismark_mapping_efficiencies.txt
+for file in *SE_report.txt
+do mapeff=$(grep "Mapping efficiency" $file | cut -f 2)
+echo -e "${file}\t${mapeff}" >> bismark_mapping_efficiencies.txt
+done
+
+
+
+
+#METH CONTEXT PERCENTAGES
+echo -e "file\tCpG.pct\tCHG.pct\tCHH.pct\tCN_or_CHH">methylation_context_percentages.txt
+for file in *SE_report.txt
+do cpg=$(grep "C methylated in CpG context:" $file | cut -f 2)
+chg=$(grep "C methylated in CHG context:" $file | cut -f 2)
+chh=$(grep "C methylated in CHH context:" $file | cut -f 2)
+unkown=$(grep "C methylated in unknown context" $file | cut -f 2)
+echo -e "$file\t$cpg\t$chg\t$chh\t$unknown" >> methylation_context_percentages.txt
+done
+
+
+#assemble results
+mkdir pipeline_counts
+cat raw_read_counts.tsv trimmed_read_counts.tsv bismark_mapped_counts.tsv > pipeline_counts/pipeline_counts.txt 
+cp methylation_context_percentages.txt pipeline_counts
+cp bismark_mapping_efficiencies.txt pipeline_counts
+
+
+###########################################
+######## METHYLKIT INDIVIDUAL SITES #######
+###########################################
+
+#Test for differential methylation with methylkit
+#This can be run on the full cov files, or on the chr split cov files for paralellization
+
+#set up an input table:
+nano tipVside_methylKit0_inputTable.txt
+
+
+#paste this (or something like it for whichever study):
+run	treatInfo	id	treat
+pm-L5-s2_S5.trim_bismark_bt2.bismark.cov	side	L5s2	0
+pm-L5-s3_S1.trim_bismark_bt2.bismark.cov	side	L5s3	0
+pm-L5-t1_S6.trim_bismark_bt2.bismark.cov	tip	L5t1	1
+pm-L5-t3_S2.trim_bismark_bt2.bismark.cov	tip	L5t3	1
+pm-N12-s2_S7.trim_bismark_bt2.bismark.cov	side	Ns2	0
+pm-N12-s3_S3.trim_bismark_bt2.bismark.cov	side	Ns3	0
+pm-N12-t1_S8.trim_bismark_bt2.bismark.cov	tip	Nt1	1
+pm-N12-t3_S4.trim_bismark_bt2.bismark.cov	tip	Nt3	1
+
+
+
+#RUN METHYL KIT
+#ran fine in idev session
+module load Rstats
+methylKit0.R -m tipVside_methylKit0_inputTable.txt -N 24 --prefix methKit_tipVside_IndvSites --summary TRUE --low.count 3
+methylKit0.R -m genotype_methylKit0_inputTable.txt -N 24 --prefix methKit_genotype_IndvSites --summary TRUE --low.count 3
+
+#GET PCAS WIHTIN GENOTYPES
+
+#set up inputs
+echo -e "run\ttreatInfo\tid\ttreat" > L5_tipVside_methylKit0_inputTable.txt
+echo -e "run\ttreatInfo\tid\ttreat" > N12_tipVside_methylKit0_inputTable.txt
+grep L5 tipVside_methylKit0_inputTable.txt >> L5_tipVside_methylKit0_inputTable.txt
+grep N12 tipVside_methylKit0_inputTable.txt >> N12_tipVside_methylKit0_inputTable.txt
+
+#run
+methylKitPCA.R -m L5_tipVside_methylKit0_inputTable.txt -N 24 --prefix L5_tipVside --low.count 3
+methylKitPCA.R -m N12_tipVside_methylKit0_inputTable.txt -N 24 --prefix N12_tipVside --low.count 3
+
+
+
+#############################################
+## CREATE WINDOWS FOR METHYLATION ANALYSIS ##
+#############################################
+
+#----- GENERATE WINDOW FILES -----#
+#will use bed file format with 4 columns as described here (https://useast.ensembl.org/info/website/upload/bed.html):
+1. chrom - name of the chromosome or scaffold. Any valid seq_region_name can be used, and chromosome names can be given with or without the 'chr' prefix.
+2. chromStart - Start position of the feature in standard chromosomal coordinates (i.e. first base is 0).
+3. chromEnd - End position of the feature in standard chromosomal coordinates
+4. name - Label to be displayed under the feature, if turned on in "Configure this page".
+
+
+module load bedtools
+
+#generate gene windows
+gff_to_bed4.py -gff Amil.coding.gff3 -feature gene -IDstring ID -o geneBoundaries.bed
+sortBed -i geneBoundaries.bed > geneBoundaries_sorted.bed
+mv geneBoundaries_sorted.bed geneBoundaries.bed
+
+#get intergenic regions (had to do some weird sorting stuff to make bedtools happy here)
+#get scaffold lengths
+fasta_sequence_characters.py -fa Amil.v2.00.chrs.fasta > chrLengths.txt
+#convert into a pseudo bedfile 
+cat chrLengths.txt | awk 'OFS="\t" {print $1,$2,$2+1}' > chrLengths.bed
+#run bedtools sort
+bedtools sort -i chrLengths.bed > chromLengths_sorted.bed
+#turn back into 2-column chr-length table (now bedtools sorted)
+cut -f 1,2 chromLengths_sorted.bed > g.txt
+#use complementBed to exclude gene boundaries, leaving intergenic
+complementBed -i geneBoundaries.bed -g g.txt > intergenicBoundaries.bed
+cat intergenicBoundaries.bed | awk 'BEGIN {OFS="\t"; c=0};{c++; print $1,$2,$3,"intergenic"c}' > add_names
+mv add_names intergenicBoundaries.bed
+
+
+#generate exon windows
+gff_to_bed4.py -gff Amil.coding.gff3 -feature CDS -IDstring ID -o cdsBoundaries.bed
+sortBed -i cdsBoundaries.bed > cdsBoundaries_sorted.bed
+mv cdsBoundaries_sorted.bed cdsBoundaries.bed
+
+#generate intron windows using subtractBed
+#following steps modified from here: https://davetang.org/muse/2013/01/18/defining-genomic-regions/ 
+subtractBed -a geneBoundaries.bed -b cdsBoundaries.bed > intronBoundaries.bed
+
+#generate promoter windows
+gff_to_promoter_bed.py -gff Amil.coding.gff3 -bp 1000 -IDstring ID -o promoterBoundaries.bed
+
+#generate for tss windows
+gff_to_tssWindow_bed.py -gff Amil.coding.gff3 -bp 250 -IDstring ID -o tssBoundaries.bed
+
+#get 3' UTR bed file
+gff_to_bed4.py -gff Amil.coding.gff3 -feature three_prime_UTR -IDstring ID -o three_prime_UTR_Boundaries.bed
+
+#get 5' UTR bed file
+gff_to_bed4.py -gff Amil.coding.gff3 -feature five_prime_UTR -IDstring ID -o five_prime_UTR_Boundaries.bed
+
+
+#generate 1Kb windows
+module load bedtools
+fasta_sequence_characters.py -fa Amil.v2.00.chrs.fasta > chrLengths.txt
+bedtools makewindows -g chrLengths.txt -w 1000 | awk 'BEGIN{OFS="\t"}{print $0,$1"-"$2"-"$3}' > windowBoundaries_1kb.bed
+
+#generate 500 bp windows
+module load bedtools
+fasta_sequence_characters.py -fa Amil.v2.00.chrs.fasta > chrLengths.txt
+bedtools makewindows -g chrLengths.txt -w 500 | awk 'BEGIN{OFS="\t"}{print $0,$1"-"$2"-"$3}' > windowBoundaries_500bp.bed
+
+#------ REPETITIVE ELEMTNS
+#we already have a gff of repeat elements from Zach Fuller's genome build:
+Amil.repeat.gff
+
+#use repeat_bed_from_gff.R to pull out bed files for each repeat type from this file
+
+DNA_repeats.bed
+LINE_repeats.bed
+LTR_repeats.bed
+Low_complexity_repeats.bed
+RC_repeats.bed
+SINE_repeats.bed
+Simple_repeat_repeats.bed
+Unknown_repeats.bed
+
+
+
+
+#-------- GET STATS FOR WINDOWS --------#
+>get_nuc_stats
+for file in *.bed
+do echo "nucleotide_stats_from_bed.py -bed $file -fa Amil.v2.00.chrs.fasta -o ${file/.bed/}_nucStats.tsv &" >> get_nuc_stats
+done
+
+nucleotide_stats_from_bed.py -bed geneBoundaries.bed -fa Amil.v2.00.chrs.fasta -o geneBoundaries_nucStats.tsv &
+nucleotide_stats_from_bed.py -bed windowBoundaries_1kb.bed -fa Amil.v2.00.chrs.fasta -o windowBoundaries1Kb_nucstats.tsv
+nucleotide_stats_from_bed.py -bed cdsBoundaries.bed -fa Amil.v2.00.chrs.fasta -o cdsBoundaries_nucStats.tsv &
+nucleotide_stats_from_bed.py -bed promoterBoundaries.bed -fa Amil.v2.00.chrs.fasta -o promoterBoundaries_nucStats.tsv &
+nucleotide_stats_from_bed.py -bed tssBoundaries.bed -fa Amil.v2.00.chrs.fasta -o tssBoundaries_nucStats.tsv &
+
+
+
+#-------- CLOSEST GENE FOR WINDOWS --------#
+
+#THIS IS IF YOU WANT THEM FOR THE ENTIRE SET OF WINDOWS, BUT IT RUNS REALLY SLOWLY
+#CAN ALSO RUN IT JUST ON SIGNIFICANT WINDOWS BELOW
+#First get gene boundaries from GFF
+GFF="/work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00/Amil.coding.gff3"
+awk 'BEGIN {OFS="\t"}
+{if ($3=="gene")
+ {print $1,$4,$5,$9}
+ }' $GFF > geneBounds.tsv
+ 
+ 
+#then split everything up by chromosome
+tail -n +2 geneBounds.tsv | cut -f 1 | grep chr | sort | uniq > uchrs.txt
+
+WINDOWFILE=windowBoundaries_1kb.bed
+GENEBOUNDS=geneBounds.tsv
+>makeSubs
+while read CHR
+do echo "grep -w ^${CHR} $WINDOWFILE > ${CHR}_sub.bed &" >>makeSubs
+echo "grep -w ^${CHR} $GENEBOUNDS > ${CHR}_genes.tsv &" >>makeSubs
+done < uchrs.txt
+echo "grep -v ^chr $WINDOWFILE > Un_sub.bed" >>makeSubs
+echo "grep -v ^chr $GENEBOUNDS > Un_genes.tsv" >>makeSubs
+
+
+#get the closest genes
+>getClose
+while read CHR
+do echo "closeBound_upDown_gene_fromBed.R --g Amil.coding.gff3 --b ${CHR}_sub.bed --o ${CHR}_closeGeneDistances.tsv" >> getClose
+done < uchrs.txt
+echo "closeBound_upDown_gene_fromBed.R --g Amil.coding.gff3 --b Un_sub.bed --o Un_closeGeneDistances.tsv" >> getClose
+
+
+############################################
+### GLM METHYLATION LEVEL FROM BED FILES ###
+############################################
+#concatenate all covs
+cat *.cov > allCovs.tsv
+
+#split by chromosome for parallelization
+cp /work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00/chrs.txt ./uchrs.txt
+mkdir split_covs
+>doSplit
+while read chr
+do echo "grep -w \"^${chr}\" allCovs.tsv > split_covs/${chr}_sub.tsv" >> doSplit
+done < uchrs.txt
+
+
+#get the sums from the bed file
+cd split_covs
+>getSums
+for file in *_sub.tsv
+do echo "sum_cov_by_bed.R --cov $file --bed geneBoundaries.bed --o ${file/_sub.tsv/}_CovSums.tsv" >> getSums
+done
+
+launcher_creator.py -n getSums -j getSums -q normal -N 3 -w 24 -a $allo -t 00:30:00
+
+
+#reassemble the sums
+head -n 1 chr1_CovSums.tsv > gene_assembledSums.tsv
+for file in *_CovSums.tsv
+do tail -n +2 $file >> gene_assembledSums.tsv
+done
+
+
+#run glm
+>runGlmLvl
+echo "meth_lvl_by_glm_from_bed.R --i gene_assembledSums.tsv --n 2000 --iter 3 --o gene_N2000_I3
+meth_lvl_by_glm_from_bed.R --i gene_assembledSums.tsv --n 3000 --iter 3 --o gene_N3000_I3
+meth_lvl_by_glm_from_bed.R --i gene_assembledSums.tsv --n 4000 --iter 1 --o gene_N4000_I3
+meth_lvl_by_glm_from_bed.R --i gene_assembledSums.tsv --n 5000 --iter 1 --o gene_N5000_I1
+meth_lvl_by_glm_from_bed.R --i gene_assembledSums.tsv --n 2000 --iter 6 --o gene_N2000_I6
+meth_lvl_by_glm_from_bed.R --i gene_assembledSums.tsv --n 3000 --iter 6 --o gene_N3000_I6
+meth_lvl_by_glm_from_bed.R --i gene_assembledSums.tsv --n 4000 --iter 3 --o gene_N4000_I3
+meth_lvl_by_glm_from_bed.R --i gene_assembledSums.tsv --n 5000 --iter 3 --o gene_N5000_I3" >> runGlmLvl
+
+#NOTE ALL OF THESE ARE ESSENTIALLY EQUAL
+#GO WITH N 3000 ITER 3 FOR ALL
+
+###########################################
+########## METHYLKIT FOR WINDOWS ##########
+###########################################
+
+
+
+NCORES=24
+LOWCOUNT=5
+MINPER=4
+geneWindowFile=/work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00/geneBoundaries.bed
+
+
+>runMethylKitWindows
+
+#RUN FOR GENES
+geneWindowFile=/work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00/geneBoundaries.bed
+echo "\
+methylKitWindows.R -m tipVside_methylKit0_inputTable.txt -N $NCORES --prefix tissue_genes --minimum_depth $LOWCOUNT -a Amil.v2.00.chrs.fasta --windows_bed $geneWindowFile --min_per_group $MINPER
+methylKitWindows.R -m genotype_methylKit0_inputTable.txt -N $NCORES --prefix genotype_genes --minimum_depth $LOWCOUNT -a Amil.v2.00.chrs.fasta --windows_bed $geneWindowFile --min_per_group $MINPER" >> runMethylKitWindows
+
+#RUN FOR EXONS
+exonWindowFile=/work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00/cdsBoundaries.bed
+echo "\
+methylKitWindows.R -m tipVside_methylKit0_inputTable.txt -N $NCORES --prefix tissue_exons --minimum_depth $LOWCOUNT -a Amil.v2.00.chrs.fasta --windows_bed $exonWindowFile --min_per_group $MINPER
+methylKitWindows.R -m genotype_methylKit0_inputTable.txt -N $NCORES --prefix genotype_exons --minimum_depth $LOWCOUNT -a Amil.v2.00.chrs.fasta --windows_bed $exonWindowFile --min_per_group $MINPER" >> runMethylKitWindows
+
+#RUN FOR PROMOTERS
+promoterWindowFile=/work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00/promoterBoundaries.bed
+echo "\
+methylKitWindows.R -m tipVside_methylKit0_inputTable.txt -N $NCORES --prefix tissue_promoters --minimum_depth $LOWCOUNT -a Amil.v2.00.chrs.fasta --windows_bed $promoterWindowFile --min_per_group $MINPER
+methylKitWindows.R -m genotype_methylKit0_inputTable.txt -N $NCORES --prefix genotype_promoters --minimum_depth $LOWCOUNT -a Amil.v2.00.chrs.fasta --windows_bed $promoterWindowFile --min_per_group $MINPER" >> runMethylKitWindows
+
+#RUN FOR TSSs
+tssWindowFile=/work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00/tssBoundaries.bed
+echo "\
+methylKitWindows.R -m tipVside_methylKit0_inputTable.txt -N $NCORES --prefix tissue_tss --minimum_depth $LOWCOUNT -a Amil.v2.00.chrs.fasta --windows_bed $tssWindowFile --min_per_group $MINPER
+methylKitWindows.R -m genotype_methylKit0_inputTable.txt -N $NCORES --prefix genotype_tss --minimum_depth $LOWCOUNT -a Amil.v2.00.chrs.fasta --windows_bed $tssWindowFile --min_per_group $MINPER" >> runMethylKitWindows
+
+
+#RUN FOR WINDOWS
+window1KbFile=/work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00/windowBoundaries_1kb.bed
+echo "\
+methylKitWindows.R -m tipVside_methylKit0_inputTable.txt -N $NCORES --prefix tissue_1KbWindows --minimum_depth $LOWCOUNT -a Amil.v2.00.chrs.fasta --windows_bed $window1KbFile --min_per_group $MINPER
+methylKitWindows.R -m genotype_methylKit0_inputTable.txt -N $NCORES --prefix genotype_1KbWindows --minimum_depth $LOWCOUNT -a Amil.v2.00.chrs.fasta --windows_bed $window1KbFile --min_per_group $MINPER" >> runMethylKitWindows
+
+
+#RUN FOR 500 BP WINDOWS
+windowFile=/work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00/windowBoundaries_500bp.bed	
+echo "\
+methylKitWindows.R -m tipVside_methylKit0_inputTable.txt -N $NCORES --prefix tissue_500bpWindows --minimum_depth $LOWCOUNT -a Amil.v2.00.chrs.fasta --windows_bed $windowFile --min_per_group $MINPER
+methylKitWindows.R -m genotype_methylKit0_inputTable.txt -N $NCORES --prefix genotype_500bpWindows --minimum_depth $LOWCOUNT -a Amil.v2.00.chrs.fasta --windows_bed $windowFile --min_per_group $MINPER" >> runMethylKitWindows
+
+
+
+
+#############################################
+######## METHYLATION LEVEL BASIC WAY ########
+#############################################
+
+#first concatenate the covs adding file name as 6th column
+>all_covs.tsv
+for file in *.cov
+do echo "${file}..."
+awk -v FILE="$file" '{print $0"\t"FILE}' $file >> all_covs.tsv
+done
+
+
+#then get stats
+GENE_BOUNDS=/work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00/geneBoundaries.bed
+echo "basic_methylation_from_bed.R --cov all_covs.tsv --bed $GENE_BOUNDS --o gene_basicStatsBed.tsv" > getBasic
+launcher_creator.py -n getBasic -j getBasic -q normal -N 1 -w 1 -a $allo -e $email -t 10:00:00
+sbatch getBasic.slurm 
+
+
+
+#takes about 6 hours to run for genes
+#probably too long for windows
+
+#--- OPTIONALLY PARALELLIZE BY SCAFFOLD ---#
+
+#SPLIT BY CHROMOSOME
+
+#get scaffolds
+REFERENCE_GENOME=/work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00/Amil.v2.00.chrs.fasta
+grep ">" $REFERENCE_GENOME | sed 's/>//' > uchrs.txt
+
+#split cov
+mkdir splitCovs
+>doSplits
+while read chr
+do echo "grep \"^${chr}\" all_covs.tsv > splitCovs/${chr}_sub.cov" >> doSplits
+done < uchrs.txt
+
+#grab bed files except for windows (deal with those below)
+
+
+#get stats for bedfiles in a loop
+>getBasic
+for BEDFILE in *.bed
+do for file in *_sub.cov
+do echo "basic_methylation_from_bed.R --cov $file --bed $BEDFILE --o ${file/_sub.cov/}_${BEDFILE/.bed/}.basicStats" >>getBasic
+done
+done
+
+#assemble results
+for BEDFILE in *.bed
+do echo "${BEDFILE}..."
+PREFIX=${BEDFILE/.bed/}
+head -n 1 chr1_${PREFIX}.basicStats > ${PREFIX}_basicStatsBed.tsv
+for file in *${PREFIX}.basicStats
+do tail -n +2 $file >> ${PREFIX}_basicStatsBed.tsv
+done
+done
+
+
+#############################################
+###### VARY WINDOW SIZES FOR PRECISION ######
+#############################################
+
+#create bed files with varying window sizes for chr1
+grep -w "^chr1" /work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00/chrLengths.txt  > ./chr1Length.txt
+bedtools makewindows -g chr1Length.txt -w 100 | awk 'BEGIN{OFS="\t"}{print $0,$1"_"$2"_"$3}' > windowBoundaries_100bp.bed
+bedtools makewindows -g chr1Length.txt -w 500 | awk 'BEGIN{OFS="\t"}{print $0,$1"_"$2"_"$3}' > windowBoundaries_500bp.bed
+bedtools makewindows -g chr1Length.txt -w 1000 | awk 'BEGIN{OFS="\t"}{print $0,$1"_"$2"_"$3}' > windowBoundaries_1000bp.bed
+bedtools makewindows -g chr1Length.txt -w 5000 | awk 'BEGIN{OFS="\t"}{print $0,$1"_"$2"_"$3}' > windowBoundaries_5kb.bed
+bedtools makewindows -g chr1Length.txt -w 10000 | awk 'BEGIN{OFS="\t"}{print $0,$1"_"$2"_"$3}' > windowBoundaries_10kb.bed
+bedtools makewindows -g chr1Length.txt -w 50000 | awk 'BEGIN{OFS="\t"}{print $0,$1"_"$2"_"$3}' > windowBoundaries_50kb.bed
+bedtools makewindows -g chr1Length.txt -w 100000 | awk 'BEGIN{OFS="\t"}{print $0,$1"_"$2"_"$3}' > windowBoundaries_100kb.bed
+
+
+#-------- RUN BASIC STATS ON EACH OF THEM --------#
+
+#grab the scaffold subset cov file for chr1
+ln -s /scratch/02260/grovesd/benchmarking_project/picoMethyl/bismark/hostRun/basicStatsBed/basic1KbWindows/chr1_sub.cov .
+
+#first set aside the 100bp bed file to run separately in chunks
+mkdir split100bp
+#(forgot to keep log of how I did this. But used bash split)
+
+#run the others
+>pmPrecis
+for BEDFILE in windowBoundaries_*.bed
+do W=${BEDFILE/windowBoundaries_/}
+WINDOW=${W/.bed/}
+for file in *_sub.cov
+do CHR=${file/_sub.cov/}
+OUTNAME=${WINDOW}_${CHR}.basicStats
+echo "basic_methylation_from_bed.R --cov $file --bed $BEDFILE --o ${OUTNAME}" >>pmPrecis
+done
+done
+
+launcher_creator.py -n pmPrecis -j pmPrecis -q normal -N 1 -w 7 -a $allo -e $email -t 08:00:00
+sbatch pmPrecis.slurm
+
+#assemble results
+head -n 1 100bp_chr1_chr1.basicStats > 100bp_chr1_basicStatsBed.tsv
+for file in *.basicStats
+do tail -n +2 $file >> ${PREFIX}_basicStatsBed.tsv
+done
+
+
+#send *.basicStats results to benchmarking_coral_methylation/picomethyl/datasets/windowPrecision
+
+
+
+#---------------- RUN METHYLKIT ----------------#
+
+cd benchmarking_project/windowSize_precision/picomethyl/methylKit
+
+NCORES=36
+
+>runMethylKit
+for file in windowBoundaries*.bed
+do PREFIX=${file/.bed/}
+echo "methylKitWindows.R -m genotype_methylKit0_inputTable.txt -N $NCORES --prefix $PREFIX --low.count 1 -a Amil.v2.00.chrs.fasta -w $file" >> runMethylKit
+done
+
+
+################################################
+######### SIMULATE REDUCED SEQUENCING ##########
+################################################
+#didn't trust results from resampling at the .cov level as above
+#repeating from fastq files
+
+#set up pcts
+echo "100
+90
+75
+50
+25
+12.5
+6.25
+3.125
+1.5625" > pcts.txt
+
+#make subdirs
+while read pct
+do echo "mkdir pct${pct}"
+done<pcts.txt
+
+#subset the trim files
+>makeSubs 
+while read pct
+do for file in *.trim
+ do echo "random_fastq_subsetter_by_prob.py -i $file -pct ${pct} -o pct${pct}/${file}" >> makeSubs
+ done
+done < pcts.txt
+
+
+#RUN BISMARK
+
+GENOME_PATH="/work/02260/grovesd/lonestar/bismark_Amil_Zach_Fullers_v2.00"
+module load bowtie
+module load samtools
+
+>runBismark
+for file in *.trim
+do echo "bismark --bowtie2 --score_min L,0,-0.6 -N 1 --non_directional --multicore 4 --genome $GENOME_PATH $file" >> runBismark
+done
+launcher_creator.py -n runBismark -j runBismark -q normal -N 2 -w 4 -a $allo -e $email -t 10:00:00
+sbatch runBismark.slurm
+
+#EXTRACT COVS
+module load samtools
+GENOME_PATH="/work/02260/grovesd/lonestar/bismark_Amil_Zach_Fullers_v2.00"
+
+>extractMeth
+for file in *bismark_bt2.bam
+do echo "bismark_methylation_extractor $file -s --multicore 2 --ample_memory --merge_non_CpG --comprehensive --cytosine_report --genome_folder $GENOME_PATH" >> extractMeth
+done
+launcher_creator.py -n extractMeth -j extractMeth -q normal -N 2 -w 4 -a $allo -e $email -t 06:00:00
+sbatch extractMeth.slurm 
+
+
+#RUN METHYLKIT
+NCORES=24
+LOWCOUNT=5
+MINPER=4
+geneWindowFile=/work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00/geneBoundaries.bed
+methylKitWindows.R -m ../genotype_methylKit0_inputTable.txt -N $NCORES --prefix genotype_genes --minimum_depth $LOWCOUNT -a Amil.v2.00.chrs.fasta --windows_bed $geneWindowFile --min_per_group $MINPER
+methylKitWindows.R -m ../tipVside_methylKit0_inputTable.txt -N $NCORES --prefix tissue_genes --minimum_depth $LOWCOUNT -a Amil.v2.00.chrs.fasta --windows_bed $geneWindowFile --min_per_group $MINPER
+
+
+#RUN BASIC ANALYSIS FOR GBM LEVEL
+#first concatenate the covs adding file name as 6th column
+>all_covs.tsv
+for file in *.cov
+do echo "${file}..."
+awk -v FILE="$file" '{print $0"\t"FILE}' $file >> all_covs.tsv
+done
+
+
+#then get stats
+GENE_BOUNDS=/work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00/geneBoundaries.bed
+echo "basic_methylation_from_bed.R --cov all_covs.tsv --bed $GENE_BOUNDS --o gene_basicStatsBed.tsv" > getBasic
+launcher_creator.py -n getBasic -j getBasic -q normal -N 1 -w 1 -a $allo -e $email -t 4:00:00
+sbatch getBasic.slurm 
+
+#assemble them
+mkdir difference_results
+while read pct; do echo "cp pct${pct}/genotype_genes_methylKit.Rdata difference_results/pct.${pct}_genotype_genes_methylKit.Rdata";done<pcts.txt
+
+
+
+#############################################
+############## SIMULATE POOLS ###############
+#############################################
+#idea here is to split fastqs into equal piles
+
+#split files into twelths
+>doSplits
+for file in *.trim
+do twelth=`echo $(($(wc -l $file | cut -d " " -f 1) / 12))`
+echo "split -l $twelth $file ${file/.trim}_SUB" >> doSplits
+done
+
+#concatenate these into bits for 3x pools
+>makeCats
+for file in *.trim
+do echo "cat ${file/.trim/}_SUBa[a,b,c,d] > ${file/.trim}_POOL1.fq" >>makeCats
+echo "cat ${file/.trim/}_SUBa[e,f,g,h] > ${file/.trim}_POOL2.fq" >>makeCats
+echo "cat ${file/.trim/}_SUBa[i,j,k,l] > ${file/.trim}_POOL3.fq" >>makeCats
+done
+
+#build genotype pools
+cat pm-L5-*POOL1*.fq > L5_pool1.fastq
+cat pm-L5-*POOL2*.fq > L5_pool2.fastq
+cat pm-L5-*POOL3*.fq > L5_pool3.fastq
+
+cat pm-N12-*POOL1*.fq > N12_pool1.fastq
+cat pm-N12-*POOL2*.fq > N12_pool2.fastq
+cat pm-N12-*POOL3*.fq > N12_pool3.fastq
+
+#RETURN TO TOP AND RUN EVERYTHING IN TERMS OF THE POOLS TO GET THE COV FILES
+
+#-------- THEN GET WINDOW RESULTS --------#
+
+LOWCOUNT=1
+NCORES=24
+>runMethylKitWindows
+
+#RUN FOR GENES
+geneWindowFile=/work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00/geneBoundaries.bed
+window1KbFile=/work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00/windowBoundaries_1kb.bed
+echo "\
+methylKitWindows.R -m poolGenoTreatTable.txt -N $NCORES --prefix genotype_genes --low.count $LOWCOUNT -a Amil.v2.00.chrs.fasta -w $geneWindowFile
+methylKitWindows.R -m poolGenoTreatTable.txt -N $NCORES --prefix genotype_1KbWindows --low.count $LOWCOUNT -a Amil.v2.00.chrs.fasta -w $window1KbFile" >> runMethylKitWindows
+
+
+
+#############################################
+######### REDUCED POOL METHOD TEST ##########
+#############################################
+
+#REDUCE THE READS
+#target is 300 million reads
+#we start with 8 trim files, so we need 37.5 million from each
+>randSubs
+for file in *.trim
+do echo "random_fastq_subsetter.py -i $file -n 37500000 -o ${file/.trim/}_37.5mil.fastq" >> randSubs
+done
+
+
+
+
+
+
+
+
+
+
+
+#---------------- APPENDIX ----------------#
+#Below are notes on doing the read reductions by resampling the COV files
+#I got worried this didn't work well, and redid it by resampling the fastq files and repeating the entire pipeline
+#Results turned out to be almost identical, so keeping this here for reference
+
+##############################################
+##### RESAMPLE COV FILES FOR SENSITIVITY #####
+##############################################
+#wanted to resample at the level of the counts matrix made by methylKit, but this didn't work well
+#instead will resample at the level of the covs themselves, then push through methyl kit
+#surprisingly resampling the covs doesn't take that long
+
+#RESAMPLE THE COVS
+>runReduction
+for file in *.cov
+do echo "reduce_cov.R --i $file" >> runReduction
+done
+
+
+#----------- RERUN BASIC STATS -----------#
+
+#concatenate the covs adding file name as 6th column
+for dir in $(ls -d pct*)
+do echo "${dir}..."
+>${dir}_allCovs.tsv
+for file in ${dir}/*trim_bismark_bt2.bismark.cov
+do FILE_NAME=${file/${dir}\//}
+awk -v FILE="$FILE_NAME" '{print $0"\t"FILE}' $file >> ${dir}_allCovs.tsv
+done
+done
+
+#run basic stats
+geneWindowFile=/work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00/geneBoundaries.bed
+>runBasicStats
+for file in pct*allCovs.tsv
+do echo "basic_methylation_from_bed.R --cov $file --bed $geneWindowFile --o ${file/_allCovs.tsv/}_gene_basicStatsBed.tsv" >> runBasicStats
+done
+
+#----------- RERUN METHYLKIT -----------#
+
+#set up args
+NCORES=24
+LOWCOUNT=1
+INPUT_TABLE=/scratch/02260/grovesd/benchmarking_project/picoMethyl/poolBismark/poolGenoTreatTable.txt
+INPUT_TABLE=/scratch/02260/grovesd/benchmarking_project/picoMethyl/bismark/hostRun/reduce_cov/genotype_methylKit0_inputTable.txt
+geneWindowFile=/work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00/geneBoundaries.bed
+
+#put command file in each directory
+for dir in $(ls -d pct*)
+do echo "methylKitWindows.R -m $INPUT_TABLE -N $NCORES --prefix genotype_genes --low.count $LOWCOUNT -a Amil.v2.00.chrs.fasta -w $geneWindowFile" > ${dir}/runMethylKit
+done
+
+#run the job in each pct directory
+#(works with an idev session)
+
+#assemble the results
+
+
+#send the results files to benchmarking_coral_methylation/picomethyl/datasets/readReduced_gbm_diff
+#prepare with picoMethyl_read_reductions.R
+#compare with others with read_reduced_gbm_response.R
+
+
+##############################################
+########### RESAMPLE FOR GBM LEVEL ###########
+##############################################
+
+#return to GLM METHYLATION LEVEL FROM BED FILES
+#get file gene_CovSums.tsv
+#resample the sums
+reduce_covSums.R --i gene_assembledSums.tsv
+
+#then get glm levels for each reduced set
+cd resampledCovSums
+ln -s ../gene_assembledSums.tsv .
+>reductionGlmLvls
+for file in *_assembledSums.tsv
+do echo "meth_lvl_by_glm_from_bed.R --i $file --n 3000 --iter 1 --o ${file/_CovSums.tsv/}" >>reductionGlmLvls
+done
+
+launcher_creator.py -n reductionGlmLvls -j reductionGlmLvls -q normal
+
+#send the results to benchmarking_coral_methylation/picomethyl/datasets/readReduced_gbm/
+#prepare with picoMethyl_read_reductions.R
+#compare with others with read_reduced_gbm_level.R
+
+#------------------------------------------------------------------------------------------------------#
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#--------------------------------- OLD STUFF BELOW
+
+############################################
+######### METHYLATION LEVEL BY GLM #########
+############################################
+#ALTERNATIVE METHOD TO THE ONE ABOVE, NOT PARALELLIZED AND NOT HOOKED TO BED FILE EXACTLY
+#use the outputs from methylKitWindows.R to run glms to get coefficients for 
+#each region in windows indicating their effect on methylation probability
+
+CHUNKSIZE=4000
+ITER=3
+
+echo "\
+meth_lvl_by_glm.R --i genotype_1KbWindows_methylKit.Rdata --n $CHUNKSIZE --iter $ITER --o 1KbWindows
+meth_lvl_by_glm.R --i genotype_exons_methylKit.Rdata --n $CHUNKSIZE --iter $ITER --o exons
+meth_lvl_by_glm.R --i genotype_genes_methylKit.Rdata --n $CHUNKSIZE --iter $ITER --o genes
+meth_lvl_by_glm.R --i genotype_promoters_methylKit.Rdata --n $CHUNKSIZE --iter $ITER --o promoters
+meth_lvl_by_glm.R --i genotype_tss_methylKit.Rdata --n $CHUNKSIZE --iter $ITER --o tss" > glmMethLvl
+
+
+launcher_creator.py -n glmMethLvl -j glmMethLvl -q normal -N 2 -w 2 -a $allo -e $email -t 10:00:00
+
+
+#------- OPTIONALLY RUN PARALELLIZED ---------#
+>paraGlm
+for i in $(seq 1 24)
+do echo "meth_lvl_by_glm.R --i tissue_genes_methylKit.Rdata --n 4000 --iter 1 --o genes${i}" >> paraGlm
+done
+
+#combine
+ll genes*_glmLvls.Rdata > glmRepFiles.txt
+
+
+
+
+
+#####################################
+#### SPLIT COVS FOR GBM PIPELINE ####
+#####################################
+
+#first split them
+
+#keep just the chromosome, position, methylatedCount, and unmethylated count
+
+cp /work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00/chrs.txt ./uchrs.txt
+
+mkdir split_covs
+>doSplit
+for file in *.cov
+do echo "${file}..."
+PREFIX=${file/.trim_bismark_bt2.bismark.cov/}
+while read chr
+do echo "grep -w \"^${chr}\" $file |\
+ sed -e \"s/$/\t$PREFIX/\"\
+ > split_covs/${PREFIX}_${chr}.sub" >> doSplit
+done < uchrs.txt
+done
+
+
+
+
+
+
+
+############################################
+########## FORMAT FOR GBM ANALYSES #########
+############################################
+
+
+#----- ARRANGE GENOME INFO FOR GBM PIPELINE -----#
+GENOME_DIR="$WORK/Amil_Zach_Fullers_v2.00/"
+GENOME="Amil.v2.00.chrs.fasta"
+GENOME_PATH="$WORK/Amil_Zach_Fullers_v2.00/Amil.v2.00.chrs.fasta"
+BASE="$WORK/Amil_Zach_Fullers_v2.00/Amil.v2.00.chrs"
+GFF="Amil.coding.gff3"
+GTF="Amil.coding.gtf"
+GFF_SUB_PATH="$WORK/Amil_Zach_Fullers_v2.00/gffSubs"
+PARENT_FEATURE="mRNA"
+BLOCK_FEATURE="exon"
+PARENT_ID="ID="
+BLOCK_ID="Parent="
+GENE_ID="ID"
+#------------------------------------------------#
+
+#MAKE GFF SUBSETS
+#make dir to put them in
+mkdir ${GFF_SUB_PATH}
+
+#get scaffolds
+grep "^>chr" $GENOME | sed 's/>//' | cut -d " " -f 1 > chrs.txt
+
+#set up commands to make gff Subsets
+>makeGffs
+while read chr
+do echo "grep -w \"^${chr}\" $GFF > ${GFF_SUB_PATH}/${chr}_sub_${GFF}" >> makeGffs
+done < chrs.txt
+
+#get a gff transcript-to-gene table
+parent_table_from_gff.R --gff $GFF --feature $PARENT_FEATURE --idTag $PARENT_ID --parentTag $BLOCK_ID --o mRNA_to_gene.txt
+
+
+
+#DO ASSIGMENT
+mkdir assigned_covs
+>assign
+while read chr
+do for filePath in split_covs/*_${chr}.sub
+do file=$(echo $filePath | tr '\n' '\0' | xargs -0 -n 1 basename)
+echo "assign_positionsV3.py -i $filePath -gff ${GFF_SUB_PATH}/${chr}_sub_${GFF} -o assigned_covs/${file/.sub/}.assigned -parentFeature $PARENT_FEATURE -blockFeature $BLOCK_FEATURE -parentId $PARENT_ID -blockId $BLOCK_ID" >> assign
+done
+done<uchrs.txt
+
+
+
+launcher_creator.py -n assignPico -j assign -q normal -a $allo -e $email -N 2 -w 42 -t 4:00:00
+
+
+
+
+#then compile into single files for each chromosome, 
+#making R objects labeled by whether genes are present on scaffold
+>compileChrs
+mkdir chr_covs
+while read chr
+do echo "cat assigned_covs/*_${chr}.assigned > chr_covs/${chr}.cov && convert_scaffold_to_Robject.R chr_covs/${chr}.cov" >> compileChrs
+done < uchrs.txt
+
+launcher_creator.py -n compileChrs -j compileChrs -q development -a $allo -t 01:00:00 -N 1 -w 48
+
+
+#assemble all the covs
+cat *.cov > all_gbm_covs.tsv
+
+
+
+#gather only those with gbm data
+mkdir gbm_Robjects
+mv chr_covs/*.Rdata gbm_Robjects/
+
+
+
+###########################################
+######### GET GBM STATS WITH GLM ##########
+###########################################
+#get GBM by running glm in chunks:
+#(This one runs on the full concatenated dataset in chunks)
+>runGbmReps
+for i in $(seq 2 10)
+do echo "gbm_by_glm_onSumsV2_subIterated.R --i all_gbm_covs.tsv --n 20 --o allRep${i}" >> runGbmReps
+done
+
+
+#works with wayness of 2
+launcher_creator.py -n gbmLvlBumb -j runGbmReps -q normal -N 3 -w 1 -a $allo -e $email -t 6:00:00
+
+
+#assemble the results
+echo -e "gene\tcoef\tnorm\trepFile" > gbm_reps.tsv
+for file in allRep*all.tsv
+ do echo "${file}..."
+ sed -e "s/$/\t$file/" $file >> gbm_reps.tsv
+done
+
+
+#get averages accross replicates with average_gbm_reps.R on Mac
+
+
+##############################################
+##### GET TREATMENT EFFECTS ON PROMOTERS #####
+##############################################
+
+
+>promoterEffects
+for file in *gbm.Rdata
+do echo "treatEffect_by_glm_scaffoldRobjectInputs.R --i $file --t treatment_table.txt --o ${file/_gbm.Rdata/}_promoterEffects.txt --mode promoter" >>promoterEffects
+done
+
+
+#takes about 30 minutes for 48 to run in parallel
+launcher_creator.py -n promoterEffects -j promoterEffects -q normal -N 4 -w 24 -a $allo -e $email -t 05:00:00
+
+
+#IF IT DIDN'T FINISH
+
+#make a finish job file
+cp promoterEffects finishPromoterEffects
+
+#remove completed lines
+for file in *_promoterEffects.txt*
+do toRemove=${file/.insufficientData/}
+sed -i "/--o $toRemove/d" ./finishPromoterEffects 
+done &
+
+
+#once all complete, assemble into single file
+cat *_promoterEffects.txt > all_promoter_glm_estimates.tsv
+
+
+#########################################
+########## GET TREATMENT EFFECT #########
+#########################################
+
+#separate into genes
+cut -f 3 all_gbm_covs.tsv | sort | uniq > all_genes.txt
+
+
+mkdir gene_covs
+rm gene_covs/*.cov
+>splitByGene
+while read gene
+do echo "grep -w $gene all_gbm_covs.tsv > gene_covs/${gene}.cov && convert_scaffold_to_Robject.R gene_covs/${gene}.cov" >> splitByGene
+done < all_genes.txt
+
+launcher_creator.py -n splitByGene -j splitByGene -q normal -N 1 -w 48 -a $allo -t 02:00:00
+
+
+
+#(This one runs on individual genes)
+>getTreatEffects
+for file in *.Rdata
+do echo "treatEffect_by_glm_geneRobjectInputs.R --i $file --t treatment_table.txt --o ${file/.Rdata/}_results.txt" >> getTreatEffects
+done
+
+
+
+
+#note, wayness 48 seems too high
+launcher_creator.py -n getTreatEffects -j getTreatEffects -q normal -N 1 -w 12 -a $allo -e $email -t 6:00:00
+
+
+#IN CASE IT DIDN'T FINISH
+#make a finish job file
+cp getTreatEffects finishTreatEffects
+
+#remove completed commands from it
+for file in *gbm_results.txt
+do sed -i "/--o $file/d" ./finishTreatEffects 
+done &
+
+
+#concatenate the results
+cat *_results.txt > all_gbm_treat_effects.tsv
+
+
+
+##########################################
+######## GET GBM LEVEL BASIC WAY #########
+##########################################
+
+>getBasicGbmLvl
+for file in *gbm.Rdata
+do gene=${file/_gbm.Rdata/}
+echo "basic_gbm_stats_forSingleGenes.R --i $file --g transcript_lengths.tsv --blockID $BLOCK_ID --o ${gene}_basicGbmLvl" >> getBasicGbmLvl
+done
+
+
+#ASSEMBLE THE RESULTS
+
+#build the headers
+firstFile=$(ls *_basicGbmLvl_by_gene.tsv | head -n 1)
+echo $(head -n 1 $firstFile) > LvlHeader.txt
+
+cp LvlHeader.txt all_basic_gbmLvl_by_gene.tsv
+cp LvlHeader.txt all_basic_gbmLvl_by_exon.tsv
+cp LvlHeader.txt all_basic_gbmLvl_by_promoter.tsv
+cp LvlHeader.txt all_basic_gbmLvl_by_promoterPlusExon1.tsv
+
+#add the data
+cat *_basicGbmLvl_by_gene.tsv | grep -v ^parentGene >> all_basic_gbmLvl_by_gene.tsv &
+cat *_basicGbmLvl_by_exon.tsv | grep -v ^parentGene >> all_basic_gbmLvl_by_exon.tsv &
+cat *_basicGbmLvl_by_promoter.tsv | grep -v ^parentGene >> all_basic_gbmLvl_by_promoter.tsv &
+cat *_basicGbmLvl_by_promoterPlusExon1.tsv | grep -v ^parentGene >> all_basic_gbmLvl_by_promoterPlusExon1.tsv &
+
+
+
+###########################################
+####### GET GBM TREATMENT BASIC WAY #######
+###########################################
+
+#make gene-wise gff subs
+
+
+
+>getBasicGbmTreat
+for file in *gbm.Rdata
+do gene=${file/_gbm.Rdata/}
+echo "basic_gbm_stats_with_treatments_forSingleGenes.R --i $file --g transcript_lengths.tsv --blockID $BLOCK_ID --o ${gene}_basicGbmTreatments --t treatment_table.txt" >> getBasicGbmTreat
+done
+
+
+
+#ASSEMBLE THE RESULTS
+
+#build the headers
+firstFile=$(ls *_basicGbmTreatments_by_gene.tsv | head -n 1)
+echo $(head -n 1 $firstFile) > header.txt
+start=$(cut -f 1 -d " " header.txt)
+
+cp header.txt all_basicTreatment_gbm_by_gene.tsv
+cp header.txt all_basicTreatment_gbm_by_exon.tsv
+cp header.txt all_basicTreatment_gbm_by_promoter.tsv
+cp header.txt all_basicTreatment_gbm_by_promoterPlusExon1.tsv
+
+
+#add the data
+cat *_basicGbmTreatments_by_gene.tsv | grep -v ^parentGene >> all_basicTreatment_gbm_by_gene.tsv &
+cat *_basicGbmTreatments_by_exon.tsv | grep -v ^parentGene >> all_basicTreatment_gbm_by_exon.tsv &
+cat *_basicGbmTreatments_by_promoter.tsv | grep -v ^parentGene >> all_basicTreatment_gbm_by_promoter.tsv &
+cat *_basicGbmTreatments_by_promoterPlusExon1.tsv | grep -v ^parentGene >> all_basicTreatment_gbm_by_promoterPlusExon1.tsv &
+
+
+
+###############################################
+## GET GENE STATS FOR DIFFERENT GBM MEASURES ##
+###############################################
+
+module load cufflinks
+gffread Amil.coding.gff3 -T -o Amil.coding.gtf
+gene_stats_from_gtf.py -gtf Amil.coding.gtf -fa Amil.v2.00.chrs.fasta -o nucleotideStats
+
+
+
+
+
+
+  
+

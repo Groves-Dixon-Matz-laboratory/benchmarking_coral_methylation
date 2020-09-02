@@ -1,0 +1,206 @@
+#benchmarking rna walkthrough
+
+
+
+########################################
+#### DOWNLOAD READS FROM BASE-SPACE ####
+########################################
+
+
+#list your current projects
+bs list project
+
+#download this one
+bs download project -i 126488489 -o JA19078
+
+#grab the fastqs and put them into single directory
+for dir in ls -d JA19078_download/*/; do echo "mv ${dir}*.gz fastqs/";done
+
+
+#concat lane duplicates
+for file in *L004*.fastq
+do echo "cat $file ${file/_L004_/_L005_} > ${file/_L004_R1_001.fastq/}.fastq" >> concat
+done
+
+
+#trim
+>trimse
+for file in *.fastq
+do echo "cutadapt \
+-a GATCGGAAGAGCA \
+-a AGATCGGAAGAGC \
+--minimum-length 20 \
+-q 20 \
+-o ${file/.fastq/}.trim \
+$file > ${file}_trimlog.txt" >> trimse
+done
+
+
+#mapping
+module load bowtie
+export REFERENCE_GENOME="/work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00_symbC1_catted/Amil_SymC1.fasta"
+>mapse
+for file in *.trim
+do echo "\
+bowtie2 -x $REFERENCE_GENOME -U $file --local -p 12 -S ${file/.trim/}.sam">> mapse
+done
+
+#get the zoox ratios
+zooxTypeV2.pl *.sam minq=40 > zooxTypes_symABCDtranscriptomes.tsv
+
+
+
+#convert to bams
+for file in *.sam;
+do echo "samtools sort -O bam -o ${file/.sam/}.bam $file &"
+done
+
+
+#SPLIT THE BAM FILES INTO HOST AND SYMBIONT
+
+#make bed files for the scaffolds
+bed_from_fasta.py -fa Amil_SymC1.fasta > all_scaffolds.bed
+grep "^SymbC1" all_scaffolds.bed > symbC1_scaffolds.bed
+grep -v "^SymbC1" all_scaffolds.bed > host_scaffolds.bed
+
+#split the bamfiles for symbiont
+for file in *.bam
+do echo "samtools view -L symbC1_scaffolds.bed -o ${file/.bam/}_symbC.bam $file &"
+done
+
+#split the bamfiles for host
+for file in *.bam
+do echo "samtools view -L host_scaffolds.bed -o ${file/.bam/}_host.bam $file &"
+done
+
+
+#GET GENE READ COUNTS
+
+#for symbiont
+MY_GFF="/work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00_symbC1_catted/SymbC1.Gene_Models.Revised.GFF3"; GENE_ID="ID"
+echo "/work/02260/grovesd/stampede2/subread-1.6.3-source/bin/featureCounts -a $MY_GFF -t gene -g $GENE_ID -o symbiont_rnaseq_gene_counts.txt -T 64 --primary *.bam" > runFeatureCounts
+
+
+#for host
+MY_GFF="$WORK/Amil_Zach_Fullers_v2.00/Amil.coding.gff3"; GENE_ID="ID"
+echo "/work/02260/grovesd/stampede2/subread-1.6.3-source/bin/featureCounts -a $MY_GFF -t gene -g $GENE_ID -o rnaseq_gene_counts.txt -T 64 --primary *.bam" > runFeatureCounts
+
+
+
+#---------- repeat feature counts with deduplication
+
+>removeDups
+for file in *.bam
+do runID=${file/.bam/}
+ echo "samtools sort -O bam -o ${runID}_sorted.bam $file &&\
+ java -Xms4g -jar /work/02260/grovesd/lonestar/picard/picard-tools-1.119/MarkDuplicates.jar\
+ INPUT=${runID}_sorted.bam\
+ OUTPUT=${runID}_dupsRemoved.bam\
+ METRICS_FILE=${runID}_dupMetrics.txt\
+ REMOVE_DUPLICATES=true" >> removeDups
+ done
+
+#for host
+MY_GFF="$WORK/Amil_Zach_Fullers_v2.00/Amil.coding.gff3"; GENE_ID="ID"
+echo "/work/02260/grovesd/stampede2/subread-1.6.3-source/bin/featureCounts -a $MY_GFF -t gene -g $GENE_ID -o rnaseq_gene_counts_DEDUPPED.txt -T 64 --primary *_dupsRemoved.bam" > runFeatureCounts
+
+
+
+
+
+
+#---- READ COUNTS THROUGHOUT PIPELINE
+#raw
+wc -l *.fastq |\
+ awk '{split($2, a, "_")
+ print a[1]"\t"$1/4"\trawCounts"}' |\
+ grep -v total > raw_read_counts.tsv &
+
+
+#trimmed
+wc -l *.trim |\
+ awk '{split($2, a, "_")
+ print a[1]"\t"$1/4"\ttrimmedCounts"}' |\
+ grep -v total > trimmed_read_counts.tsv &
+
+
+#get alignment counts
+>getInitialAlignment
+for file in *.bam
+do echo "samtools flagstat $file > ${file/.bam/}_flagStats.txt" >> getInitialAlignment
+done
+
+
+#format aligned reads
+>mapped_count.tsv
+for file in *_flagStats.txt
+do pp=$(grep "mapped" $file | head -n 1)
+ echo -e "$file\t$pp" |\
+ awk '{split($1, a, "_")
+ print a[1]"\t"$2"\tpredupMapped"}' >> mapped_count.tsv
+ done
+
+
+#counted on genes
+total_gene_counts_featureCounts.R rnaseq_gene_counts.txt
+
+
+#all counts:
+gene_count_sumsFC.tsv
+mapped_count.tsv
+raw_read_counts.tsv
+trimmed_read_counts.tsv
+
+
+#cat them together
+cat *.tsv > all_pipeline_counts.txt
+
+
+#analyze on Mac:
+all_dedup_pipeline_counts.txt
+rnaseq_gene_counts.txt
+
+
+#follow benchmark_rnaseq_analysis.txt from here
+
+
+
+
+
+
+
+######################################
+########## SYMBIONT RATIOS ###########
+######################################
+
+#get them Misha's way
+zooxTypeV2.pl *.sam minq=40 > zooxType_PL.tsv
+
+#with my awk script
+zooxType.awk > zooxType_AWK.tsv
+
+
+#get them the BASH way
+MINQ=40
+Astring=symA
+Bstring=symB
+Cstring=symC
+Dstring=symD
+
+echo -e "File\tTotal\tnonSymb\tcladeA\tcladeB\tcladeC\tcladeD" > zooxType_BASH.tsv
+for file in *.sam
+do aCount=`samtools view -F 256 -q $MINQ $file | cut -f 3 | grep $Astring | wc -l`
+bCount=`samtools view -F 256 -q $MINQ $file | cut -f 3 | grep $Bstring | wc -l`
+cCount=`samtools view -F 256 -q $MINQ $file | cut -f 3 | grep $Cstring | wc -l`
+dCount=`samtools view -F 256 -q $MINQ $file | cut -f 3 | grep $Dstring | wc -l`
+nonZooxCount=`samtools view -F 256 -q $MINQ $file | cut -f 3 | grep -v $Astring | grep -v $Bstring | grep -v $Cstring | grep -v $Dstring | wc -l`
+totalCount=`samtools view -F 256 -q $MINQ $file | wc -l`
+echo -e "${file}\t${totalCount}\t${nonZooxCount}\t${aCount}\t${bCount}\t${cCount}\t${dCount}" >> zooxType_BASH.tsv
+done &
+
+
+
+
+
+
+

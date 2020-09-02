@@ -1,0 +1,9 @@
+#benchmark_rnaseq_analysis_walkthrough.txt
+
+
+#starting with files:
+all_dedup_pipeline_counts.txt
+rnaseq_gene_counts.txt
+
+
+

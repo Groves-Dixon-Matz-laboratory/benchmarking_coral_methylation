@@ -1,0 +1,8 @@
+pm-L5-s2_S5.trim_bismark_bt2_SE_report.txt	40.2%
+pm-L5-s3_S1.trim_bismark_bt2_SE_report.txt	42.9%
+pm-L5-t1_S6.trim_bismark_bt2_SE_report.txt	41.2%
+pm-L5-t3_S2.trim_bismark_bt2_SE_report.txt	36.9%
+pm-N12-s2_S7.trim_bismark_bt2_SE_report.txt	39.8%
+pm-N12-s3_S3.trim_bismark_bt2_SE_report.txt	38.0%
+pm-N12-t1_S8.trim_bismark_bt2_SE_report.txt	35.7%
+pm-N12-t3_S4.trim_bismark_bt2_SE_report.txt	41.5%

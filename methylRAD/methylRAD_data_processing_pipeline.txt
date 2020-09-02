@@ -1,0 +1,528 @@
+methylRAD_data_processing_pipeline.txt
+
+
+#####################################
+### DOWNLOAD READS FROM BASESPACE ### 
+#####################################
+bs list projects
+bs download project -i 138025890 -o JA19277
+
+#organize fastqs
+mkdir fastqs 
+cd fastqs
+for dir in $(ls -d ../JA19277/*)
+do echo "mv $dir/*.gz ."
+done
+
+#decompress them
+gunzip *.gz
+
+
+#DOUBLE-CHECK THINGS MAKE SENSE
+ls *.fastq | wc -l
+	#192 = 2 genotypes x 2 tissues x 2 enzymes x 3 reps x 2 pe files x 4 lane dups
+
+ls *L001_R1_001.fastq | wc -l
+	#24 = 2 genotypes x 2 tissues x 2 enzymes x 3 reps
+
+ls mrF*L001_R1_001.fastq | wc -l
+	#12 = 2 genotypes x 2 tissues x 3 reps
+
+ls mrM*L001_R1_001.fastq | wc -l
+	#12 = 2 genotypes x 2 tissues x 3 reps
+	
+	
+######################################
+#### CONCATENTATE LANE DUPLICATES ####
+######################################
+
+#FspE1 forward
+for file in mrF*L001_R1_001.fastq
+do echo "cat ${file} ${file/_L001_/_L002_} ${file/_L001_/_L003_} ${file/_L001_/_L004_} > ${file/_L001_R1_001.fastq/}_R1.fq &"
+done
+
+#MspJ1 forward
+for file in mrM*L001_R1_001.fastq
+do echo "cat ${file} ${file/_L001_/_L002_} ${file/_L001_/_L003_} ${file/_L001_/_L004_} > ${file/_L001_R1_001.fastq/}_R1.fq &"
+done
+
+#FspE1 reverse
+for file in mrF*L001_R2_001.fastq
+do echo "cat ${file} ${file/_L001_/_L002_} ${file/_L001_/_L003_} ${file/_L001_/_L004_} > ${file/_L001_R2_001.fastq/}_R2.fq &"
+done
+
+#MspJ1 reverse
+for file in mrM*L001_R2_001.fastq
+do echo "cat ${file} ${file/_L001_/_L002_} ${file/_L001_/_L003_} ${file/_L001_/_L004_} > ${file/_L001_R2_001.fastq/}_R2.fq &"
+done
+
+
+#CHECK CONCATENATENATION RESULTS MAKE SENSE
+ls *.fq | wc -l
+	#48 = 2 genotypes x 2 tissues x 2 enzymes x 3 reps x 2pe files
+
+
+#GET RAW READ COUNTS
+wc -l *.fq |\
+ awk '{split($2, a, ".fq")
+ print a[1]"\t"$1/4"\trawCounts"}' |\
+ grep -v total > raw_read_counts.tsv &
+
+
+######################################
+############## RUN FASTQ #############
+######################################
+
+#NOTE. FOR FURTHER QUALITY ASSESSMENTS SEE APPENDIX AT BOTTOM.
+
+NTEST=400000
+mkdir testRun
+for file in *.fq
+do head -n $NTEST $file > testRun/${file}
+done
+
+
+#Run FastQC on subsets
+
+module load fastqc
+mkdir Fastqc_Restults_raw/
+> runFQC
+for file in *.fq
+do echo "fastqc -o Fastqc_Restults_raw/ -f fastq $file &" >> runFQC
+done
+
+
+############################
+######## PREP READS ########
+############################
+
+
+
+#RUN FASTQC
+module load fastqc
+mkdir Fastqc_Restults_raw/
+> runFQC
+for file in *.fastq
+do echo "fastqc -o Fastqc_Restults_raw/ -f fastq $file" >> runFQC
+done
+
+
+
+#FILTER READS FOR CORRECT STARTING SEQUENCES AND PCR DUPLICATES
+#note this script should work for both single end and paired end reads
+#for single end mode simply leave off the -r2 argument
+
+>checkReads
+for file in mr*R1.fq
+do R1=$file
+ R2=${file/_R1.fq/}_R2.fq
+ echo "filter_methylGBS_reads.py -r1 $R1 -r2 $R2 -o1 ${R1/.fq/}_filt0.fastq -o2 ${R2/.fq/}_filt0.fastq" >> checkReads
+done
+
+#gather results
+oFile=checkReads.o2974137
+grep "were duplicates" $oFile | grep "R1.fq" | awk '{split($5, a, "("); split(a[2], b, "%"); print b[1]}' > R1_duplication_rates.txt
+grep "were duplicates" $oFile | grep "R2.fq" | awk '{split($5, a, "("); split(a[2], b, "%"); print b[1]}' > R2_duplication_rates.txt
+grep "were duplicates based on both R1 and R2 read" $oFile | awk '{split($5, a, "("); split(a[2], b, "%"); print b[1]}' > paired_duplication_rates.txt
+grep "correct start for both pe reads" $oFile | awk '{split($5, a, "("); split(a[2], b, "%"); print b[1]}' > correct_start_rates.txt
+grep "had correct shape and were unique" $oFile | awk '{split($5, a, "("); split(a[2], b, "%"); print b[1]}' > passing_filter_methylGBS_rates.txt
+
+
+
+#Trim away the first six basepairs and any adapter sequences
+>trimpe
+for file in *_R2_filt0.fastq
+do echo "cutadapt \
+-a GATCGGAAGAGCA \
+-A GATCGGAAGAGCA \
+-a AGATCGGAAGAGC \
+-A AGATCGGAAGAGC \
+-u 6 \
+-U 6 \
+--minimum-length 20 \
+-q 20 \
+-o ${file/_R2_filt0.fastq/}_R1.trim \
+-p ${file/_R2_filt0.fastq/}_R2.trim \
+${file/_R2_filt0.fastq/}_R1_filt0.fastq \
+$file > ${file}_trimlog.txt" >> trimpe
+done
+
+launcher_creator.py -n trimpe -j trimpe -q normal -N 1 -w 24 -a $allo -e $email -t 08:00:00
+
+
+
+
+############################
+######### MAP READS ########
+############################
+
+
+#build mapping commands
+export REFERENCE_GENOME="/work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00/Amil.v2.00.chrs.fasta"
+
+module load bowtie
+>mappe
+for file in *_R1.trim
+do echo "\
+bowtie2 -x $REFERENCE_GENOME -1 $file -2 ${file/_R1/_R2} --local -p 6 -S ${file/_R1.trim/}.sam" >> mappe
+done
+
+
+launcher_creator.py -n mapMRcd -j mappe -q normal -N 4 -w 6 -a $allo -e $email -t 6:00:00
+
+#sort and convert to bams
+module load samtools
+>sortConv
+for file in *.sam
+do echo "samtools sort -o ${file/.sam/}.bam $file && samtools index ${file/.sam/}.bam" >> sortConv
+done
+
+launcher_creator.py -n sortConv -j sortConv -q development -N 1 -w 24 -a $allo -e $email -t 02:00:00
+sbatch sortConv.slurm
+
+##################################
+######### PIPELINE COUNTS ########
+##################################
+
+wc -l *.fq |\
+ awk '{split($2, a, ".fastq")
+ print a[1]"\t"$1/4"\trawCounts"}' |\
+ grep -v total > raw_read_counts.tsv &
+
+
+
+#GET POST CHECK READ COUNTS
+wc -l *filt0.fastq |\
+ awk '{split($2, a, "_filt0.fastq")
+ print a[1]"\t"$1/4"\tstartChecked"}' |\
+ grep -v total > startCheck_read_counts.tsv &
+
+
+
+#GET POST TRIMMING READ COUNT
+wc -l *.trim |\
+ awk '{split($2, a, ".trim")
+ print a[1]"\t"$1/4"\ttrimmedCounts"}' |\
+ grep -v total > trimmed_read_counts.tsv &
+
+
+#run flagstat
+module load samtools
+>flagstats
+for file in *.bam
+do echo "samtools flagstat $file > ${file/.bam/}_flagstats.txt" >>flagstats
+done
+
+
+#format total reads
+>prededup_mapped_count.tsv
+for file in  *flagstats.txt
+do pp=$(grep "mapped" $file | head -n 1)
+ echo -e "$file\t$pp" |\
+ awk '{split($1, a, "_prededup_flagstats.txt")
+ print a[1]"\t"$2"\tpredupMapped"}' >> prededup_mapped_count.tsv
+ done
+
+
+#format properly paired reads
+>properly_paired_count.tsv
+for file in *flagstats.txt
+do pp=$(grep "properly paired" $file); echo -e "$file\t$pp" |\
+ awk '{split($1, a, "_host_flagstats.txt")
+ split($7, b, "(")
+ print a[1]"\t"$2"\tpredupPropPaired"}' >>properly_paired_count.tsv
+ done
+
+
+#get mapping efficiencies
+>mappingEffs.txt
+for file in *flagstats.txt
+do eff=`grep "mapped (" $file`; echo -e "$file\t$eff" >> mappingEffs.txt
+done
+
+#assemble pipeline counts
+cat raw_read_counts.tsv startCheck_read_counts.tsv trimmed_read_counts.tsv prededup_mapped_count.tsv properly_paired_count.tsv > pipelineCounts.tsv
+
+
+#######################################
+######### GET WINDOW COUNTS ###########
+#######################################
+
+#window generation is shown in picoMethyl_data_processing_pipeline.txt
+#get the bed files with windows
+cp /work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00/*.bed .
+#exclude the window bed files since these are so huge
+#deal with those in parallel below
+
+ls *.bed
+	cdsBoundaries.bed
+	chromLengths_sorted.bed
+	DNA_repeats.bed
+	five_prime_UTR_Boundaries.bed
+	geneBoundaries.bed
+	intergenicBoundaries.bed
+	intronBoundaries.bed
+	LINE_repeats.bed
+	Low_complexity_repeats.bed
+	LTR_repeats.bed
+	promoterBoundaries.bed
+	RC_repeats.bed
+	Rolling_Circle_repeats.bed
+	Simple_repeat_repeats.bed
+	SINE_repeats.bed
+	three_prime_UTR_Boundaries.bed
+	tssBoundaries.bed
+	Unknown_repeats.bed
+
+
+#run bedtools
+>runBedtools
+for BEDFILE in *.bed
+do echo "bedtools multicov -bams *.bam -bed $BEDFILE > mr_${BEDFILE}_counts.tsv0" >> runBedtools
+done
+
+launcher_creator.py -n runBedtools -j runBedtools -q normal -N 1 -w 18 -a $allo -e $email -t 12:00:00
+
+
+
+module load bedtools
+launcher_creator.py -n runBedtools -j runBedtools -q normal -N 1 -w 5 -a $allo -e $email -t 08:00:00
+
+
+#format output
+samples=`ls *.bam | sed 's/.bam//' | tr "\n" "\t"`
+echo -e "chr\tstart\tend\tname\t$samples" > header.txt
+
+>catheads
+for file in *_counts.tsv0
+do echo "cat header.txt $file > ${file/_counts.tsv0/}_multicov.tsv" >>catheads
+done
+
+
+#----- split by chromosome for parallelizing small windows -----#
+window1KbFile=/work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00/windowBoundaries_1kb.bed
+window500bpFile=/work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00/windowBoundaries_500bp.bed
+
+#build chr beds
+while read chr
+do echo "${chr}..."
+grep -w "^${chr}" $window500bpFile > ${chr}_500bp_windows.bed
+done < chrs.txt
+grep -v "^chr" $window500bpFile > chrUn_500bp_windows.bed
+
+#run multicov for each
+>paraMulticov
+for file in chr*500bp_windows.bed
+do echo "bedtools multicov -bams *.bam -bed $file > mr_${file}_counts.tsv0" >>paraMulticov
+done
+
+launcher_creator.py -n paraMulticov -j paraMulticov -q normal -N 1 -w 15 -a $allo -e $email -t 10:00:00
+sbatch paraMulticov.slurm
+
+
+#returns 15 *counts.tsv0 files. One for each chromosome and 1 for scaffolds
+#add headers to each
+samples=`ls *.bam | sed 's/.bam//' | tr "\n" "\t"`
+echo -e "chr\tstart\tend\tname\t$samples" > header.txt
+for file in *500bp_windows.bed_counts.tsv0
+do echo "cat header.txt $file > ${file/_counts.tsv0/}_multicov.tsv"
+done
+
+
+#Run DESeq on them on TACC
+for file in *bed_multicov.tsv
+do echo "methylRAD_differences_TACC.R --i $file --pCut 0.2 --o ${file/.bed_multicov.tsv/} &"
+done
+
+#check results
+ls *500bp_windows_genotype_response.tsv | wc -l
+ls *500bp_windows_tissue_response.tsv | wc -l
+
+
+#ASSEMBLE INTO FINAL TSV FILES
+#genotype
+head -n 1 mr_chrUn_500bp_windows_genotype_response.tsv > mr_500bp_window_genotype_allResponse.tsv
+for file in *500bp_windows_genotype_response.tsv
+do echo "${file}..."
+ tail -n +2 $file >> mr_500bp_window_genotype_allResponse.tsv
+done
+
+#check
+wc -l *_windows_genotype_response.tsv
+wc -l mr_500bp_window_genotype_allResponse.tsv
+
+
+#tissue
+head -n 1 mr_chrUn_500bp_windows_tissue_response.tsv > mr_500bp_window_tissue_allResponse.tsv
+for file in *_windows_tissue_response.tsv
+do tail -n +2 $file >> mr_500bp_window_tissue_allResponse.tsv
+done
+
+#check
+wc -l *_windows_tissue_response.tsv
+wc -l mr_500bp_window_tissue_allResponse.tsv
+
+#send to PC here: benchmarking_coral_methylation/mbdSeq/datasets/
+#incorporate into results list with process_methylRAD.R
+
+
+
+#############################################
+###### VARY WINDOW SIZES FOR PRECISION ######
+#############################################
+
+#INSTRUCTIONS FOR BUILDING THE BED FILES IN picoMethyl_data_processing_pipeline.txt
+#INSTRUCTIONS FOR SPLITTING THE BED FILES IN mbdseq_data_processing.txt
+
+#GET COUNTS WITH BEDTOOLS
+
+#grab the bam files and indexes
+ln -s ../../methylRAD/bamfiles/*.bam* .
+
+#grab the split bedfiles (see VARY WINDOW SIZES FOR PRECISION in picoMethyl_data_processing_pipeline.txt for making these)
+
+#run bedtools
+>getCounts
+for file in windowBoundaries_*.bed
+do echo "bedtools multicov -bams *.bam -bed $file > ${file/windowBoundaries_/}.tsv" >> getCounts
+done
+
+launcher_creator.py -n mrPrecis -j getCounts -q normal -N 1 -w 7 -a $allo -e $email -t 12:00:00
+
+
+#ASSEMBLE THE RESULTS
+#build headers
+samples=$(ls *.bam | tr "\n" "\t" | sed "s|\t*$||")
+echo -e "chr\tstart\tend\tname\t${samples}" > header.txt
+
+#cat them to results
+for file in *.bed.tsv
+do echo "cat header.txt $file > ${file/.bed.tsv/}_windowRes.tsv"
+done
+
+#send to Mac
+
+
+#--------------------------- APPENDIX ---------------------------#
+
+###################################
+######## CHECK READ FORMAT ########
+###################################
+
+#make a set of subsets for quick looks
+mkdir product_orientation
+cd catted_fastqs
+for file in *.fq
+do echo "head -n 100000 $file > ../product_orientation/${file}"
+done 
+
+
+#CHECK FOR CORRECT START TO READS
+
+#FspE1 forward:
+>fspe1_startsR1.tsv
+for file in mrF*R1.fq
+do\
+ tot=`expr $(cat $file | wc -l) / 4`
+ match=`grep "^....CC" $file | wc -l`
+ prop=`echo "scale=2 ; $match / $tot" | bc`
+ echo -e "${file}\t${tot}\t${match}\t${prop}" >>fspe1_startsR1.tsv
+done &
+
+#FspE1 reverse:
+>fspe1_startsR2.tsv
+for file in mrF*R2.fq
+do\
+ tot=`expr $(cat $file | wc -l) / 4`
+ match=`grep "^ACAC" $file | wc -l`
+ prop=`echo "scale=2 ; $match / $tot" | bc`
+ echo -e "${file}\t${tot}\t${match}\t${prop}" >> fspe1_startsR2.tsv
+done &
+
+
+#Mspj1 forward:
+>mspj1_startsR1.tsv
+for file in mrM*R1.fq
+do\
+ tot=`expr $(cat $file | wc -l) / 4`
+ match=`grep "^....CC" $file | wc -l`
+ prop=`echo "scale=2 ; $match / $tot" | bc`
+ echo -e "${file}\t${tot}\t${match}\t${prop}" >>mspj1_startsR1.tsv
+done &
+
+#Mspj1 reverse:
+>mspj1_startsR2.tsv
+for file in mrM*R2.fq
+do\
+ tot=`expr $(cat $file | wc -l) / 4`
+ match=`grep "^ACAC" $file | wc -l`
+ prop=`echo "scale=2 ; $match / $tot" | bc`
+ echo -e "${file}\t${tot}\t${match}\t${prop}" >>mspj1_startsR2.tsv
+done &
+
+
+#CHECK READ ORIENTATION
+#based on the library prep, several things should be true about the reads
+
+#For forward reads:
+#the first four bases should be the NNRW
+#the 5th and 6th base should be 'CC'
+#For both enzymes, the recognition sequence should appear in ~50% of reads
+#Recognition sequences are:
+
+FspE1:
+	If the forward read adapter (i5) bound facing the cut site
+	nnrwCC[N15]CCG
+
+#For reverse reads:
+FspE1:
+	
+	ACAC[N15]CCG
+
+	
+#CHECK FOR RECOGNITION SEQUENCES
+
+#For Fspe1 forward reads
+>fspe1_matchesR1.tsv
+for file in mrF*R1_filt0.fastq
+do\
+ tot=`expr $(cat $file | wc -l) / 4`
+ match=`grep "....CC...............CGG" $file | wc -l`
+ prop=`echo "scale=2 ; $match / $tot" | bc`
+ echo -e "${file}\t${tot}\t${match}\t${prop}" >>fspe1_matchesR1.tsv
+done &
+
+
+#For Fspe1 reverse reads
+>fspe1_matchesR2.tsv
+for file in mrF*R2_filt0.fastq
+do\
+ tot=`expr $(cat $file | wc -l) / 4`
+ match=`grep "ACAC...............CGG" $file | wc -l`
+ prop=`echo "scale=2 ; $match / $tot" | bc`
+ echo -e "${file}\t${tot}\t${match}\t${prop}" >>fspe1_matchesR2.tsv
+done &
+
+
+#For Mspj1 forward reads
+>mspj1_matchesR1.tsv
+for file in mrM*R1_filt0.fastq
+do\
+ tot=`expr $(cat $file | wc -l) / 4`
+ match=`grep "....CC...............CG" $file | wc -l`
+ prop=`echo "scale=2 ; $match / $tot" | bc`
+ echo -e "${file}\t${tot}\t${match}\t${prop}" >>mspj1_matchesR1.tsv
+done &
+
+
+#For Mspj1 reverse reads
+>mspj1_matchesR2.tsv
+for file in mrM*R2_filt0.fastq
+do\
+ tot=`expr $(cat $file | wc -l) / 4`
+ match=`grep "ACAC...............CG" $file | wc -l`
+ prop=`echo "scale=2 ; $match / $tot" | bc`
+ echo -e "${file}\t${tot}\t${match}\t${prop}" >>mspj1_matchesR2.tsv
+done &
+
+

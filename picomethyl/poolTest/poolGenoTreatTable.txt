@@ -1,0 +1,7 @@
+run	treatInfo	id	treat
+L5_pool1_bismark_bt2.bismark.cov	L5	L1	1
+L5_pool2_bismark_bt2.bismark.cov	L5	L2	1
+L5_pool3_bismark_bt2.bismark.cov	L5	L3	1
+N12_pool1_bismark_bt2.bismark.cov	N12	N1	0
+N12_pool2_bismark_bt2.bismark.cov	N12	N2	0
+N12_pool3_bismark_bt2.bismark.cov	N12	N3	0
